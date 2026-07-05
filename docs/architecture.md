@@ -14,21 +14,23 @@ Reference outputs are behavioral references, not objective truth labels.
 
 ```mermaid
 flowchart TD
-    A[Original prompt template P] --> B[1. Chunking layer]
-    B --> C[Prompt chunks: role, task, constraints, schema, examples, input slot]
-    C --> D[2. Exploration layer]
-    D --> E[Candidate prompts P']
-    E --> F[3. Input variance and evaluation layer]
-    X[Input set X] --> R[Reference dataset: M(P, x)]
+    A["Original prompt template"] --> B["1. Chunking layer"]
+    B --> C["Typed prompt chunks"]
+    C --> D["2. Exploration layer"]
+    D --> E["Candidate prompt templates"]
+    E --> F["3. Input variance and evaluation layer"]
+    X["Input set"] --> R["Reference outputs"]
     R --> F
-    F --> G[Candidate reports]
-    G --> H[4. Optimizer epoch loop]
-    H --> I[Pareto frontier]
-    I --> J[Credit assignment]
-    J --> K[Mutation and recombination]
+    F --> G["Candidate reports"]
+    G --> H["4. Optimizer epoch loop"]
+    H --> I["Pareto frontier"]
+    I --> J["Credit assignment"]
+    J --> K["Mutation and recombination"]
     K --> D
-    I --> L[Best prompt and artifacts]
+    I --> L["Best prompt and artifacts"]
 ```
+
+In mathematical terms, the reference outputs are `y_i = M(P, x_i)`, and each candidate is evaluated by comparing `M(P_candidate, x_i)` against those references across the input set.
 
 ## Layers
 
@@ -97,4 +99,3 @@ chunk -> explore -> evaluate across inputs -> Pareto select
 ```
 
 The optimizer does not select only the lowest-loss prompt early. It preserves trade-offs between compression and behavior preservation.
-
