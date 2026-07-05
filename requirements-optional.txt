@@ -1,5 +1,0 @@
-# Optional runtime adapters. The core package has no required third-party deps.
-tiktoken
-sentence-transformers
-huggingface_hub
-

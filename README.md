@@ -26,8 +26,27 @@ The built-in CLI uses a deterministic mock model. Real model use is via the `Mod
 Optional adapters:
 
 ```bash
-python3 -m pip install -r requirements-optional.txt
+conda env create -f environment.yml
+conda activate prompt-compression-layer
 export HF_TOKEN=...
+```
+
+This environment is project-specific and is expected at:
+
+```text
+/Users/scsherm/anaconda3/envs/prompt-compression-layer
+```
+
+If `conda run -n prompt-compression-layer ...` resolves the wrong Python on this machine, use the direct interpreter:
+
+```bash
+/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python -m unittest discover -v
+```
+
+For pip-only setup:
+
+```bash
+python3 -m pip install -r requirements.txt
 ```
 
 Tokenizer specs:

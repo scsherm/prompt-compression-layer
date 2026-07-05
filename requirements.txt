@@ -1,0 +1,5 @@
+# Runtime adapters for tokenizer-aware exploration and embedding drift.
+huggingface_hub>=0.24
+sentence-transformers>=3.0
+tiktoken>=0.7
+

@@ -1,0 +1,139 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Behavioral Prompt Compression: Objective and Architecture}
+\author{Prompt Compression Layer}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Problem}
+
+Let \(M\) be a frozen target model configuration, \(P\) an original prompt
+template, and \(X = \{x_i\}_{i=1}^{n}\) an input set. The compiler searches for
+a compressed prompt template \(P'\) that reduces instruction tokens while
+preserving target-model behavior:
+
+\[
+M(P', x_i) \approx M(P, x_i)
+\quad \text{for many } x_i \in X.
+\]
+
+Reference outputs are behavioral references:
+
+\[
+y_i = M(P, x_i).
+\]
+
+Candidate outputs are:
+
+\[
+\hat{y}_{i,c} = M(P'_c, x_i).
+\]
+
+\section{Token Objective}
+
+Instruction-token reduction is measured on the invariant prompt layer:
+
+\[
+r_c = 1 - \frac{T_{\mathrm{instr}}(P'_c)}
+              {T_{\mathrm{instr}}(P)}.
+\]
+
+Full rendered prompt tokens can also be tracked:
+
+\[
+\bar{T}_{\mathrm{full}}(P'_c) =
+\frac{1}{n}\sum_{i=1}^{n} T(P'_c(x_i)).
+\]
+
+\section{Embedding Drift}
+
+For an embedding model \(E\), embedding drift uses Euclidean distance:
+
+\[
+d_{\mathrm{emb}}(c, i) =
+\left\| E(\hat{y}_{i,c}) - E(y_i) \right\|_2.
+\]
+
+The average embedding drift is:
+
+\[
+\bar{d}_{\mathrm{emb}}(c) =
+\frac{1}{n}\sum_{i=1}^{n} d_{\mathrm{emb}}(c, i).
+\]
+
+\section{Hybrid Loss}
+
+The candidate loss is a weighted behavioral objective:
+
+\[
+\mathcal{L}(c) =
+\lambda_t \rho_c
++ \lambda_e \bar{d}_{\mathrm{emb}}(c)
++ \lambda_j \bar{d}_{\mathrm{judge}}(c)
++ \lambda_f \phi_c
++ \lambda_q \tau_c
++ \lambda_v \nu_c,
+\]
+
+where:
+
+\[
+\rho_c = \frac{T_{\mathrm{instr}}(P'_c)}
+              {T_{\mathrm{instr}}(P)}
+\]
+
+is the token ratio, \(\phi_c\) is the format or schema failure rate,
+\(\tau_c\) is the task-metric failure rate, and \(\nu_c\) is output variance
+across repeated runs.
+
+Contract failures can be hard penalties:
+
+\[
+\mathcal{L}(c) \leftarrow \mathcal{L}(c) + 10
+\quad \text{if a required output contract fails.}
+\]
+
+\section{Pareto Frontier}
+
+Candidate \(a\) dominates candidate \(b\) when:
+
+\[
+r_a \ge r_b,\quad
+\bar{d}_{a} \le \bar{d}_{b},\quad
+\phi_a \le \phi_b,\quad
+\tau_a \le \tau_b
+\]
+
+and at least one inequality is strict.
+
+The compiler returns the non-dominated set:
+
+\[
+\mathcal{F} =
+\{c \in C : \nexists c' \in C \text{ such that } c' \succ c\}.
+\]
+
+\section{System Layers}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Layer & Purpose & Examples \\
+\midrule
+Chunking & Split invariant prompt instructions & schema, role, task, negation \\
+Exploration & Rewrite and assemble candidates & DSL, Mandarin, compact English \\
+Evaluation & Compare behavior across inputs & Euclidean drift, contracts, judge \\
+Optimization & Improve candidates over epochs & Pareto, credit, mutation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\end{document}
+

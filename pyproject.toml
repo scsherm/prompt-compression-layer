@@ -10,9 +10,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+adapters = [
+  "huggingface_hub>=0.24",
+  "sentence-transformers>=3.0",
+  "tiktoken>=0.7",
+]
+
 [project.scripts]
 prompt-compiler = "prompt_compiler.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["prompt_compiler*"]
-
