@@ -30,18 +30,20 @@ objective: reduce instruction tokens while preserving target-model behavior
 
 ## Model Roles
 
-The target model is the behavior model. It generates both:
+There are two model roles and three LLM call sites.
 
-- reference outputs from the original prompt
-- candidate outputs from proposed compressed prompts
+The target behavior model is the user-selected `--model`. It is used for both behavior-bearing call sites:
 
-The proposer model is the rewrite model. It rewrites individual non-bound chunks into shorter variants. For OpenAI-backed runs, the default proposer is:
+- reference generation: run the original prompt over each input
+- candidate completion: run each compressed candidate prompt over the same inputs
+
+The proposer model is the rewrite model. It rewrites individual non-bound chunks into shorter variants. It does not define the behavioral reference. For OpenAI-backed runs, the default proposer is:
 
 ```text
 gpt-5.4-mini-2026-03-17
 ```
 
-The target model remains a CLI input. The proposer model is configurable with `--proposer-model`.
+The target behavior model remains a CLI input. The proposer model is configurable with `--proposer-model`.
 
 ## Bound Prompt Variables
 
