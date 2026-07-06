@@ -32,9 +32,11 @@ class ReferenceExample:
     reference_output: str
     model: str
     params: dict
+    rendered_prompt: str
     prompt_hash: str
     prompt_tokens: int
     output_tokens: int
+    usage: dict[str, int] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -79,10 +81,11 @@ def build_reference_dataset(
                 reference_output=response.text,
                 model=response.model,
                 params=response.params.__dict__,
+                rendered_prompt=rendered,
                 prompt_hash=stable_hash(rendered),
                 prompt_tokens=tokenizer.count(rendered),
                 output_tokens=tokenizer.count(response.text),
+                usage=response.usage,
             )
         )
     return references
-

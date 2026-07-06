@@ -5,7 +5,7 @@
 \usepackage{booktabs}
 \usepackage{hyperref}
 
-\title{Behavioral Prompt Compression: Objective and Architecture}
+\title{Prompt Compression Layer: Optimization Objective}
 \author{Prompt Compression Layer}
 \date{}
 
@@ -14,38 +14,55 @@
 
 \section{Problem}
 
-Let \(M\) be a frozen target model configuration, \(P\) an original prompt
-template, and \(X = \{x_i\}_{i=1}^{n}\) an input set. The compiler searches for
-a compressed prompt template \(P'\) that reduces instruction tokens while
-preserving target-model behavior:
+Let \(M\) be the frozen target model configuration, \(P\) the original prompt
+template, and \(X = \{x_i\}_{i=1}^{n}\) the input set. The compiler searches for
+a compressed prompt template \(P'_c\) that reduces instruction tokens while
+preserving the target model's behavior over \(X\).
 
 \[
-M(P', x_i) \approx M(P, x_i)
-\quad \text{for many } x_i \in X.
+y_i = M(P, x_i)
 \]
-
-Reference outputs are behavioral references:
 
 \[
-y_i = M(P, x_i).
+\hat{y}_{i,c} = M(P'_c, x_i)
 \]
 
-Candidate outputs are:
+The outputs \(y_i\) are behavioral references. Candidate quality is measured by
+how closely \(\hat{y}_{i,c}\) matches those references under the configured
+evaluation metrics.
+
+\section{Template Variables}
+
+Prompt variables are template slots such as \texttt{\{\{input\}\}},
+\texttt{\{\{query\}\}}, or \texttt{\{\{document\}\}}. Let \(B(P)\) be the
+ordered placeholder sequence extracted from \(P\). Candidate assembly preserves
+this sequence:
 
 \[
-\hat{y}_{i,c} = M(P'_c, x_i).
+B(P'_c) = B(P).
 \]
+
+The instruction-token objective is measured on the invariant prompt layer,
+which is the prompt template with placeholder contents removed.
 
 \section{Token Objective}
 
-Instruction-token reduction is measured on the invariant prompt layer:
+Let \(T_{\mathrm{instr}}(P)\) be the configured tokenizer count for the
+instruction layer of \(P\). Candidate token ratio is:
 
 \[
-r_c = 1 - \frac{T_{\mathrm{instr}}(P'_c)}
-              {T_{\mathrm{instr}}(P)}.
+\rho_c =
+\frac{T_{\mathrm{instr}}(P'_c)}
+     {T_{\mathrm{instr}}(P)}.
 \]
 
-Full rendered prompt tokens can also be tracked:
+Instruction-token reduction is:
+
+\[
+r_c = 1 - \rho_c.
+\]
+
+Rendered prompt cost is also tracked:
 
 \[
 \bar{T}_{\mathrm{full}}(P'_c) =
@@ -54,86 +71,121 @@ Full rendered prompt tokens can also be tracked:
 
 \section{Embedding Drift}
 
-For an embedding model \(E\), embedding drift uses Euclidean distance:
+Let \(E\) be the configured embedding model. Prompt Compression Layer uses
+Euclidean distance for embedding drift:
 
 \[
 d_{\mathrm{emb}}(c, i) =
 \left\| E(\hat{y}_{i,c}) - E(y_i) \right\|_2.
 \]
 
-The average embedding drift is:
+Average drift for candidate \(c\) is:
 
 \[
 \bar{d}_{\mathrm{emb}}(c) =
 \frac{1}{n}\sum_{i=1}^{n} d_{\mathrm{emb}}(c, i).
 \]
 
-\section{Hybrid Loss}
+\section{Objective}
 
-The candidate loss is a weighted behavioral objective:
+The scalar objective combines token ratio and generated-output equivalence
+distance. With Euclidean embedding drift as the active equivalence signal:
 
 \[
-\mathcal{L}(c) =
+\mathcal{J}(c) =
+\lambda_t \rho_c
++ \lambda_e \bar{d}_{\mathrm{emb}}(c).
+\]
+
+Optional equivalence scorers can be added as output-distance terms:
+
+\[
+\mathcal{J}(c) =
 \lambda_t \rho_c
 + \lambda_e \bar{d}_{\mathrm{emb}}(c)
 + \lambda_j \bar{d}_{\mathrm{judge}}(c)
-+ \lambda_f \phi_c
-+ \lambda_q \tau_c
-+ \lambda_v \nu_c,
++ \lambda_r \bar{d}_{\mathrm{rouge}}(c)
++ \lambda_b \bar{d}_{\mathrm{bleu}}(c).
 \]
 
-where:
+Here \(\bar{d}_{\mathrm{judge}}\) is separate-judge disagreement, while
+\(\bar{d}_{\mathrm{rouge}}\) and \(\bar{d}_{\mathrm{bleu}}\) are text-overlap
+distances derived from ROUGE or BLEU scores.
+
+\section{Validity Signals}
+
+Structured output validity is tracked separately from the scalar objective.
+For a candidate \(c\), let:
 
 \[
-\rho_c = \frac{T_{\mathrm{instr}}(P'_c)}
-              {T_{\mathrm{instr}}(P)}
+\phi_c =
+\frac{1}{n}\sum_{i=1}^{n}\mathbf{1}[\text{format failure for }(c,i)]
 \]
 
-is the token ratio, \(\phi_c\) is the format or schema failure rate,
-\(\tau_c\) is the task-metric failure rate, and \(\nu_c\) is output variance
-across repeated runs.
+\[
+\tau_c =
+\frac{1}{n}\sum_{i=1}^{n}\mathbf{1}[\text{task-field failure for }(c,i)].
+\]
 
-Contract failures can be hard penalties:
+The report includes these rates and the associated failure cases so invalid
+candidate behavior is visible during review.
+
+Current core objective weights are:
 
 \[
-\mathcal{L}(c) \leftarrow \mathcal{L}(c) + 10
-\quad \text{if a required output contract fails.}
+\lambda_t = 0.20,\quad
+\lambda_e = 0.20.
 \]
 
 \section{Pareto Frontier}
 
-Candidate \(a\) dominates candidate \(b\) when:
+Candidate \(a\) dominates candidate \(b\) when it is at least as good on every
+frontier dimension and better on at least one:
 
 \[
 r_a \ge r_b,\quad
-\bar{d}_{a} \le \bar{d}_{b},\quad
-\phi_a \le \phi_b,\quad
-\tau_a \le \tau_b
+\bar{d}_{\mathrm{emb}}(a) \le \bar{d}_{\mathrm{emb}}(b).
 \]
 
-and at least one inequality is strict.
+Validity rates \(\phi_c\) and \(\tau_c\) are reported alongside the frontier.
 
-The compiler returns the non-dominated set:
+The returned frontier is the non-dominated set:
 
 \[
 \mathcal{F} =
 \{c \in C : \nexists c' \in C \text{ such that } c' \succ c\}.
 \]
 
-\section{System Layers}
+\section{Epoch Flow}
 
 \begin{center}
 \begin{tabular}{lll}
 \toprule
-Layer & Purpose & Examples \\
+Layer & Role & Current implementation \\
 \midrule
-Chunking & Split invariant prompt instructions & schema, role, task, negation \\
-Exploration & Rewrite and assemble candidates & DSL, Mandarin, compact English \\
-Evaluation & Compare behavior across inputs & Euclidean drift, contracts, judge \\
-Optimization & Improve candidates over epochs & Pareto, credit, mutation \\
+Reference & Build behavioral references & target model calls \\
+Bound slots & Preserve template variables & placeholder sequence \\
+Chunking & Create rewrite units & para, sent, md, schema, role, window \\
+Exploration & Propose compressed chunks & English, DSL, Mandarin, mixed \\
+Evaluation & Compare completions & token ratio and output distance \\
+Optimization & Advance population & Pareto and mutation \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\end{document}
+\section{Dataset Split}
 
+For \(n > 3\), the reference dataset is split deterministically:
+
+\[
+X_{\mathrm{train}} = X_{1:\lfloor 0.6n \rfloor},
+\quad
+X_{\mathrm{dev}} = X_{\lfloor 0.6n \rfloor:\lfloor 0.8n \rfloor},
+\quad
+X_{\mathrm{holdout}} = X_{\lfloor 0.8n \rfloor:n}.
+\]
+
+The optimizer searches on train subsets, selects finalists on dev, and reports
+holdout behavior for final frontier candidates.
+
+\end{document}

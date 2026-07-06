@@ -6,6 +6,7 @@ from enum import Enum
 
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}")
+INPUT_LABELS = frozenset({"input:", "user request:", "alert:", "document:", "query:"})
 
 
 class ChunkType(Enum):
@@ -34,9 +35,10 @@ class PromptChunk:
 
 def detect_chunk_type(text: str) -> ChunkType:
     lowered = text.lower()
-    if PLACEHOLDER_RE.search(text) or "input:" in lowered or "x=" in lowered:
+    stripped = lowered.strip()
+    if PLACEHOLDER_RE.search(text) or stripped in INPUT_LABELS:
         return ChunkType.INPUT_SLOT
-    if any(term in lowered for term in ("json", "schema", "field", "return", "status")):
+    if any(term in lowered for term in ("json", "schema", "field", "return", "status", "response:")):
         return ChunkType.OUTPUT_SCHEMA
     if any(term in lowered for term in ("do not", "don't", "never", "no markdown", "without")):
         return ChunkType.NEGATIVE_CONSTRAINT
@@ -58,5 +60,9 @@ def detect_chunk_type(text: str) -> ChunkType:
 
 
 def is_protected(text: str) -> bool:
-    return bool(PLACEHOLDER_RE.search(text))
+    stripped = text.strip().lower()
+    return bool(PLACEHOLDER_RE.search(text)) or stripped in INPUT_LABELS or stripped == "response:"
 
+
+def placeholder_names(text: str) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(match.group(1) for match in PLACEHOLDER_RE.finditer(text)))

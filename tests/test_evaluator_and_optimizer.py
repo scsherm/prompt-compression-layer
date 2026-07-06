@@ -25,7 +25,7 @@ class EvaluatorAndOptimizerTests(unittest.TestCase):
         self.assertEqual(euclidean_distance([1.0, 0.0], [1.0, 0.0]), 0.0)
         self.assertAlmostEqual(scorer.distance("a", "b"), 2**0.5)
 
-    def test_invalid_json_receives_hard_contract_penalty(self):
+    def test_invalid_json_is_reported_separately_from_equivalence_distance(self):
         evaluator = Evaluator(tokenizer=ApproxTokenizer(), output_contract=OutputContract(require_json=True))
 
         result = evaluator.compare_outputs(
@@ -35,7 +35,8 @@ class EvaluatorAndOptimizerTests(unittest.TestCase):
         )
 
         self.assertFalse(result.contract_ok)
-        self.assertGreaterEqual(result.loss, 10.0)
+        self.assertTrue(result.failures)
+        self.assertLess(result.equivalence_distance, 10.0)
 
     def test_optimizer_writes_core_artifacts_and_keeps_input_slot(self):
         prompt = PromptTemplate(

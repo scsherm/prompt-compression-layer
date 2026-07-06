@@ -22,10 +22,13 @@ def write_run_artifacts(output_dir: Path, result: "CompressionRunResult") -> Non
         stable_json(result.evaluation_report.to_dict()),
         encoding="utf-8",
     )
+    _write_candidate_prompt_audit(output_dir / "candidate_prompts.jsonl", result)
     _write_frontier_csv(output_dir / "pareto_frontier.csv", result)
+    _write_frontier_csv(output_dir / "dev_frontier.csv", result)
     _write_failures(output_dir / "failures.json", result)
     _write_jsonl(output_dir / "reference_dataset.jsonl", [item.to_dict() for item in result.reference_dataset])
     _write_jsonl(output_dir / "candidate_reports.jsonl", [report.to_dict() for report in result.all_reports])
+    _write_jsonl(output_dir / "holdout_reports.jsonl", [report.to_dict() for report in result.holdout_reports])
     _write_jsonl(
         output_dir / "candidate_outputs.jsonl",
         [record.__dict__ for report in result.all_reports for record in report.output_records],
@@ -41,10 +44,9 @@ def _write_frontier_csv(path: Path, result: "CompressionRunResult") -> None:
                 "instruction_tokens",
                 "token_reduction",
                 "avg_semantic_drift",
-                "avg_loss",
+                "objective_score",
                 "format_failure_rate",
                 "task_failure_rate",
-                "language_failure_rate",
             ],
         )
         writer.writeheader()
@@ -55,10 +57,9 @@ def _write_frontier_csv(path: Path, result: "CompressionRunResult") -> None:
                     "instruction_tokens": report.instruction_tokens,
                     "token_reduction": report.token_reduction,
                     "avg_semantic_drift": report.avg_semantic_drift,
-                    "avg_loss": report.avg_loss,
+                    "objective_score": report.objective_score,
                     "format_failure_rate": report.format_failure_rate,
                     "task_failure_rate": report.task_failure_rate,
-                    "language_failure_rate": report.language_failure_rate,
                 }
             )
 
@@ -72,3 +73,22 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _write_candidate_prompt_audit(path: Path, result: "CompressionRunResult") -> None:
+    seen: set[str] = set()
+    rows: list[dict] = []
+    for report in result.all_reports:
+        if report.candidate_id in seen:
+            continue
+        seen.add(report.candidate_id)
+        rows.append(
+            {
+                "candidate_id": report.candidate_id,
+                "instruction_tokens": report.instruction_tokens,
+                "token_reduction": report.token_reduction,
+                "operator_summary": report.operator_summary,
+                "prompt_template": report.prompt_template,
+            }
+        )
+    _write_jsonl(path, rows)

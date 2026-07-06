@@ -1,0 +1,79 @@
+You compress exactly one prompt-template chunk.
+
+Task:
+Rewrite SOURCE_CHUNK into shorter replacement text according to MODE.
+The value of rewritten_chunk will be pasted exactly where SOURCE_CHUNK was.
+Do not rewrite the full prompt.
+
+MODE:
+$operator
+
+MODE_RULE:
+$operator_instruction
+
+MODE_HARD_RULES:
+$operator_hard_requirements
+
+CHUNK_TYPE:
+$chunk_type
+
+ORIGINAL_TOKEN_COUNT:
+$original_chunk_tokens
+
+TARGET_MAX_TOKENS:
+$target_rewrite_tokens
+
+FULL_PROMPT is read-only context. It may clarify local meaning, but it is not the source to rewrite.
+SOURCE_CHUNK is the only source for rewritten_chunk.
+
+FULL_PROMPT:
+<<<FULL_PROMPT
+$original_prompt
+FULL_PROMPT
+
+SOURCE_CHUNK:
+<<<SOURCE_CHUNK
+$chunk_text
+SOURCE_CHUNK
+
+Rules:
+- rewritten_chunk must be non-empty.
+- rewritten_chunk must be complete replacement text, not analysis.
+- rewritten_chunk must not contain wrapper labels such as FULL_PROMPT, SOURCE_CHUNK, MODE, CHUNK_TYPE, TARGET_MAX_TOKENS, or rewritten_chunk.
+- Do not introduce requirements, placeholders, fields, tools, formats, examples, or constraints that are absent from SOURCE_CHUNK.
+- If a placeholder appears in rewritten_chunk, the exact same placeholder must appear in SOURCE_CHUNK.
+- Preserve placeholders exactly. Do not replace a placeholder with a description.
+- Preserve copy-protected tokens exactly when they carry meaning: field names, enum values, column names, tool names, function names, file paths, JSON keys, string literals, numbers, units, and required format names.
+- Do not translate, rename, recase, pluralize, alias, or describe copy-protected tokens.
+- Preserve every atomic obligation in SOURCE_CHUNK: condition, action, object, negation, exception, quantity, ordering, source/scope boundary, output contract, style constraint, tool-call rule, and example behavior.
+- Do not replace a specific rule with a generic rule.
+- Do not drop the object of an action or prohibition.
+- Do not drop the scope or exception of a constraint.
+- Do not broaden, narrow, invert, weaken, or strengthen the obligation.
+- For output contracts, preserve required format, fields, allowed values, ordering, language, and exclusivity rules as indivisible requirements.
+- For tool instructions, preserve the tool name, call condition, non-call condition, and fallback behavior.
+- Apply MODE_RULE and MODE_HARD_RULES. Operator language is mandatory.
+- For English-only modes, use English and/or symbols only.
+- For Mandarin modes, use Mandarin or Mandarin+symbols while preserving copy-protected tokens exactly.
+- For mixed modes, use the shortest clear mix of English, Mandarin, and symbols.
+- If safe compression is uncertain, return SOURCE_CHUNK unchanged.
+- If a compact DSL would be ambiguous or incomplete, use compact prose or return SOURCE_CHUNK unchanged.
+- rewritten_chunk must not be a dangling fragment: no unfinished clauses, unmatched braces/brackets, trailing separators, or trailing key/colon fragments.
+
+Before answering, silently check:
+1. The entire response is one JSON object.
+2. rewritten_chunk uses only SOURCE_CHUNK content.
+3. Every placeholder/literal copied from SOURCE_CHUNK is exact.
+4. Every atomic obligation from SOURCE_CHUNK is preserved.
+5. rewritten_chunk is complete replacement text.
+
+If any check fails, set rewritten_chunk to SOURCE_CHUNK unchanged.
+
+Return exactly this JSON object shape as the entire response:
+{
+  "rewritten_chunk": "...",
+  "rationale": "<12 words",
+  "risk_notes": []
+}
+
+The entirety of your response must be parsable by json.loads in Python. Do not wrap it in markdown. Do not include any text before or after the JSON object.

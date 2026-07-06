@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Protocol
 
-from prompt_compiler.prompt.chunk import PromptChunk, detect_chunk_type, is_protected
+from prompt_compiler.prompt.chunk import PLACEHOLDER_RE, ChunkType, PromptChunk, detect_chunk_type, is_protected
 from prompt_compiler.tokenizer import ApproxTokenizer, Tokenizer
 
 
@@ -25,6 +25,106 @@ def _make_chunk(prefix: str, index: int, text: str, start: int, end: int) -> Pro
         end_char=end,
         protected=is_protected(text),
     )
+
+
+INPUT_LABEL_RE = re.compile(r"(?i)(?:^|\n)\s*(input|user request|alert|document|query)\s*:\s*$")
+
+
+def _append_text_chunk(
+    chunks: list[PromptChunk],
+    *,
+    chunk_id: str,
+    text: str,
+    start: int,
+) -> None:
+    text = text.strip()
+    if not text:
+        return
+    match = INPUT_LABEL_RE.search(text)
+    if match and match.start() > 0:
+        prefix = text[: match.start()].strip()
+        label = text[match.start() :].strip()
+        if prefix:
+            chunks.append(
+                PromptChunk(
+                    id=f"{chunk_id}_body",
+                    text=prefix,
+                    chunk_type=detect_chunk_type(prefix),
+                    start_char=start,
+                    end_char=start + len(prefix),
+                    protected=is_protected(prefix),
+                )
+            )
+        label_start = start + text.rfind(label)
+        chunks.append(
+            PromptChunk(
+                id=f"{chunk_id}_label",
+                text=label,
+                chunk_type=ChunkType.INPUT_SLOT,
+                start_char=label_start,
+                end_char=label_start + len(label),
+                protected=True,
+            )
+        )
+        return
+    chunks.append(
+        PromptChunk(
+            id=chunk_id,
+            text=text,
+            chunk_type=detect_chunk_type(text),
+            start_char=start,
+            end_char=start + len(text),
+            protected=is_protected(text),
+        )
+    )
+
+
+def _split_placeholder_chunks(chunks: list[PromptChunk]) -> list[PromptChunk]:
+    split: list[PromptChunk] = []
+    for chunk in chunks:
+        matches = list(PLACEHOLDER_RE.finditer(chunk.text))
+        if not matches:
+            split.append(chunk)
+            continue
+
+        cursor = 0
+        part_index = 0
+        for match in matches:
+            before = chunk.text[cursor : match.start()].strip()
+            if before:
+                start = chunk.start_char + cursor + chunk.text[cursor : match.start()].find(before)
+                _append_text_chunk(
+                    split,
+                    chunk_id=f"{chunk.id}_{part_index}",
+                    text=before,
+                    start=start,
+                )
+                part_index += 1
+
+            placeholder = match.group(0)
+            split.append(
+                PromptChunk(
+                    id=f"{chunk.id}_{part_index}",
+                    text=placeholder,
+                    chunk_type=ChunkType.INPUT_SLOT,
+                    start_char=chunk.start_char + match.start(),
+                    end_char=chunk.start_char + match.end(),
+                    protected=True,
+                )
+            )
+            part_index += 1
+            cursor = match.end()
+
+        after = chunk.text[cursor:].strip()
+        if after:
+            start = chunk.start_char + cursor + chunk.text[cursor:].find(after)
+            _append_text_chunk(
+                split,
+                chunk_id=f"{chunk.id}_{part_index}",
+                text=after,
+                start=start,
+            )
+    return split
 
 
 @dataclass
@@ -124,7 +224,7 @@ class InstructionRoleChunker:
         start = 0
         current: list[str] = []
         current_start = 0
-        role_line = re.compile(r"(?i)^\s*(role|task|rules?|constraints?|input|output|return|schema)\s*:")
+        role_line = re.compile(r"(?i)^\s*(role|task|rules?|constraints?|input|user request|output|return|schema)\s*:")
         for line in prompt.splitlines(keepends=True):
             if role_line.search(line) and current:
                 text = "".join(current).strip()
@@ -179,4 +279,4 @@ def generate_chunkings(prompt: str, tokenizer: Tokenizer | None = None) -> dict[
         InstructionRoleChunker(),
         TokenWindowChunker(tokenizer=tokenizer),
     ]
-    return {chunker.name: chunker.chunk(prompt) for chunker in chunkers}
+    return {chunker.name: _split_placeholder_chunks(chunker.chunk(prompt)) for chunker in chunkers}

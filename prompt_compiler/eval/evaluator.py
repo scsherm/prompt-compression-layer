@@ -17,10 +17,6 @@ from prompt_compiler.tokenizer import Tokenizer
 class EvaluationWeights:
     token: float = 0.20
     embedding: float = 0.20
-    judge: float = 0.25
-    format: float = 0.20
-    task: float = 0.10
-    variance: float = 0.05
 
 
 @dataclass(frozen=True)
@@ -36,10 +32,9 @@ class FailureCase:
 class OutputComparison:
     input_id: str
     semantic_drift: float
-    loss: float
+    equivalence_distance: float
     contract_ok: bool
     task_ok: bool
-    language_ok: bool
     failures: tuple[FailureCase, ...] = ()
 
 
@@ -47,10 +42,14 @@ class OutputComparison:
 class CandidateOutputRecord:
     candidate_id: str
     input_id: str
+    rendered_prompt: str
     reference_output: str
     candidate_output: str
-    loss: float
+    equivalence_distance: float
     semantic_drift: float
+    model: str
+    usage: dict[str, int] | None = None
+    metadata: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -60,13 +59,13 @@ class CandidateReport:
     instruction_tokens: int
     token_reduction: float
     avg_semantic_drift: float
-    avg_loss: float
+    objective_score: float
     format_failure_rate: float
     task_failure_rate: float
-    language_failure_rate: float
     output_variance: float
     examples_failed: list[FailureCase]
     operator_summary: dict[str, int]
+    usage_summary: dict[str, int] = field(default_factory=dict)
     output_records: list[CandidateOutputRecord] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -93,7 +92,6 @@ class Evaluator:
         contract_result = self.output_contract.validate(candidate_output)
         semantic_drift = self.drift_scorer.distance(candidate_output, reference_output)
         task_ok = _task_equivalent(candidate_output, reference_output)
-        language_ok = "language_drift" not in contract_result.failures
 
         failures: list[FailureCase] = []
         if not contract_result.ok:
@@ -117,21 +115,14 @@ class Evaluator:
                 )
             )
 
-        loss = self.weights.embedding * semantic_drift
-        if not contract_result.ok:
-            loss += self.output_contract.hard_penalty
-        if not task_ok:
-            loss += self.weights.task
-        if not language_ok:
-            loss += self.weights.format
+        equivalence_distance = self.weights.embedding * semantic_drift
 
         return OutputComparison(
             input_id=input_id,
             semantic_drift=semantic_drift,
-            loss=loss,
+            equivalence_distance=equivalence_distance,
             contract_ok=contract_result.ok,
             task_ok=task_ok,
-            language_ok=language_ok,
             failures=tuple(failures),
         )
 
@@ -147,19 +138,25 @@ class Evaluator:
         prompt = PromptTemplate(candidate.prompt_template)
         comparisons: list[OutputComparison] = []
         output_records: list[CandidateOutputRecord] = []
+        usage_summary: dict[str, int] = {}
         for reference in references:
             rendered = prompt.render({"input": reference.input_text})
             response = model.generate(rendered, params)
+            _add_usage(usage_summary, response.usage)
             comparison = self.compare_outputs(response.text, reference.reference_output, reference.id)
             comparisons.append(comparison)
             output_records.append(
                 CandidateOutputRecord(
                     candidate_id=candidate.id,
                     input_id=reference.id,
+                    rendered_prompt=rendered,
                     reference_output=reference.reference_output,
                     candidate_output=response.text,
-                    loss=comparison.loss,
+                    equivalence_distance=comparison.equivalence_distance,
                     semantic_drift=comparison.semantic_drift,
+                    model=response.model,
+                    usage=response.usage,
+                    metadata=response.metadata,
                 )
             )
 
@@ -174,9 +171,10 @@ class Evaluator:
 
         avg_drift = mean([comparison.semantic_drift for comparison in comparisons]) if comparisons else 1.0
         token_ratio = instruction_tokens / max(original_instruction_tokens, 1)
-        avg_loss = (
-            mean([comparison.loss for comparison in comparisons]) if comparisons else self.output_contract.hard_penalty
-        ) + self.weights.token * token_ratio
+        avg_equivalence_distance = (
+            mean([comparison.equivalence_distance for comparison in comparisons]) if comparisons else self.weights.embedding
+        )
+        objective_score = self.weights.token * token_ratio + avg_equivalence_distance
 
         return CandidateReport(
             candidate_id=candidate.id,
@@ -184,13 +182,13 @@ class Evaluator:
             instruction_tokens=instruction_tokens,
             token_reduction=token_reduction,
             avg_semantic_drift=avg_drift,
-            avg_loss=avg_loss,
+            objective_score=objective_score,
             format_failure_rate=sum(not item.contract_ok for item in comparisons) / count,
             task_failure_rate=sum(not item.task_ok for item in comparisons) / count,
-            language_failure_rate=sum(not item.language_ok for item in comparisons) / count,
             output_variance=0.0,
             examples_failed=failures,
             operator_summary=operator_summary,
+            usage_summary=usage_summary,
             output_records=output_records,
         )
 
@@ -200,8 +198,9 @@ def _task_equivalent(candidate_output: str, reference_output: str) -> bool:
     reference_json = _json_dict(reference_output)
     if candidate_json is not None and reference_json is not None:
         comparable_fields = set(candidate_json) & set(reference_json) & {"status", "label", "answer"}
-        return all(candidate_json[field] == reference_json[field] for field in comparable_fields)
-    return candidate_output.strip() == reference_output.strip()
+        if comparable_fields:
+            return all(candidate_json[field] == reference_json[field] for field in comparable_fields)
+    return True
 
 
 def _json_dict(text: str) -> dict | None:
@@ -210,3 +209,11 @@ def _json_dict(text: str) -> dict | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _add_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
+    if not usage:
+        return
+    for key, value in usage.items():
+        if isinstance(value, int):
+            total[key] = total.get(key, 0) + value

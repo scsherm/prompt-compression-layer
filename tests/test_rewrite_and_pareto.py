@@ -30,9 +30,9 @@ class RewriteAndParetoTests(unittest.TestCase):
 
     def test_pareto_frontier_removes_dominated_candidates(self):
         reports = [
-            CandidateReport(candidate_id="slow_good", prompt_template="a", instruction_tokens=80, token_reduction=0.20, avg_semantic_drift=0.05, avg_loss=0.20, format_failure_rate=0.0, task_failure_rate=0.0, language_failure_rate=0.0, output_variance=0.0, examples_failed=[], operator_summary={}),
-            CandidateReport(candidate_id="fast_good", prompt_template="b", instruction_tokens=40, token_reduction=0.60, avg_semantic_drift=0.05, avg_loss=0.10, format_failure_rate=0.0, task_failure_rate=0.0, language_failure_rate=0.0, output_variance=0.0, examples_failed=[], operator_summary={}),
-            CandidateReport(candidate_id="fast_risky", prompt_template="c", instruction_tokens=20, token_reduction=0.80, avg_semantic_drift=0.30, avg_loss=0.50, format_failure_rate=0.1, task_failure_rate=0.2, language_failure_rate=0.0, output_variance=0.0, examples_failed=[], operator_summary={}),
+            CandidateReport(candidate_id="slow_good", prompt_template="a", instruction_tokens=80, token_reduction=0.20, avg_semantic_drift=0.05, objective_score=0.20, format_failure_rate=0.0, task_failure_rate=0.0, output_variance=0.0, examples_failed=[], operator_summary={}),
+            CandidateReport(candidate_id="fast_good", prompt_template="b", instruction_tokens=40, token_reduction=0.60, avg_semantic_drift=0.05, objective_score=0.10, format_failure_rate=0.0, task_failure_rate=0.0, output_variance=0.0, examples_failed=[], operator_summary={}),
+            CandidateReport(candidate_id="fast_risky", prompt_template="c", instruction_tokens=20, token_reduction=0.80, avg_semantic_drift=0.30, objective_score=0.50, format_failure_rate=0.1, task_failure_rate=0.2, output_variance=0.0, examples_failed=[], operator_summary={}),
         ]
 
         frontier = compute_pareto_frontier(reports)
