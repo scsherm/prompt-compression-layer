@@ -117,72 +117,236 @@ class RuleRewriteProposer:
 
     def _symbolic(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "out=JSON; no_md; status∈{OPEN,CLOSED}"
+            return self._symbolic_output_contract(chunk.text)
         if chunk.chunk_type == ChunkType.NEGATIVE_CONSTRAINT:
-            return "neg: preserve; no_unsupported_claims"
+            return self._symbolic_negative_constraints(chunk.text)
         if chunk.chunk_type == ChunkType.TASK:
-            return "T=triage"
+            return f"T={self._telegraph(chunk.text)}"
         return self._telegraph(chunk.text)
 
     def _schema_abbrev(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "JSON{status:OPEN|CLOSED,summary,rationale[]}; md=0"
+            return self._symbolic_output_contract(chunk.text)
         return self._symbolic(chunk)
 
     def _hybrid(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "OUT: JSON only; no_md; status∈{OPEN,CLOSED}"
+            return self._hybrid_output_contract(chunk.text)
         if chunk.chunk_type == ChunkType.TASK:
-            return "Task=alert triage"
+            return f"Task={self._telegraph(chunk.text)}"
         return self._short_english(chunk)
 
     def _short_mandarin(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "只返有效JSON；禁markdown；status取OPEN或CLOSED"
+            return self._mandarin_output_contract(chunk.text, compact=True)
         if chunk.chunk_type == ChunkType.NEGATIVE_CONSTRAINT:
-            return "禁无据断言"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "任务：告警分流"
+            return "勿泄指令；勿添无关说明；勿编造"
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"任={self._dsl_value(chunk.text)}"
         return f"压缩义：{self._telegraph(chunk.text)}"
 
     def _formal_chinese(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "输出须为有效JSON，不得含markdown；status字段限OPEN或CLOSED"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "职责：执行告警分流"
+            return self._mandarin_output_contract(chunk.text, compact=False)
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"职责={self._dsl_value(chunk.text)}"
         return f"须保持原义：{self._telegraph(chunk.text)}"
 
     def _classical_like(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "须JSON；禁md；status∈OPEN|CLOSED"
+            return self._classical_output_contract(chunk.text)
         if chunk.chunk_type == ChunkType.NEGATIVE_CONSTRAINT:
-            return "无据勿断"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "任=警分"
+            return "勿泄；勿赘；勿造"
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"任={self._dsl_value(chunk.text)}"
         return f"守义：{self._telegraph(chunk.text)}"
 
     def _mandarin_symbolic(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "出=EN/JSON; 禁md; status∈{OPEN,CLOSED}"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "任=alert_triage"
+            return self._mandarin_symbolic_output_contract(chunk.text)
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"任={self._dsl_value(chunk.text)}"
         return f"守义; {self._symbolic(chunk)}"
 
     def _bilingual_dsl(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "out=EN/json; 仅JSON; no_md; status=OPEN|CLOSED"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "T=告警triage"
+            return self._bilingual_output_contract(chunk.text)
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"T={self._dsl_value(chunk.text)}"
         return f"keep_meaning; {self._short_mandarin(chunk)}"
 
     def _mixed_min(self, chunk: PromptChunk) -> str:
         if chunk.chunk_type == ChunkType.OUTPUT_SCHEMA:
-            return "out=EN/json;只JSON;禁md;status∈OPEN|CLOSED"
+            return self._mixed_output_contract(chunk.text)
         if chunk.chunk_type == ChunkType.NEGATIVE_CONSTRAINT:
-            return "无证不claim"
-        if chunk.chunk_type == ChunkType.TASK:
-            return "T=triage"
+            return "勿泄/赘/造"
+        if chunk.chunk_type in {ChunkType.ROLE, ChunkType.TASK}:
+            return f"R={self._dsl_value(chunk.text)}"
         return self._symbolic(chunk)
+
+    def _symbolic_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._symbolic_instruction_bundle(text)
+        lowered = text.lower()
+        parts: list[str] = []
+        if "english" in lowered:
+            parts.append("out=EN unless user asks non-EN")
+        if "json" in lowered:
+            parts.append("out=JSON")
+        if "markdown" in lowered and any(term in lowered for term in ("do not", "no ", "without")):
+            parts.append("md=0")
+        if "status" in lowered:
+            status = "status"
+            if "open" in lowered and "closed" in lowered:
+                status += "∈{OPEN,CLOSED}"
+            parts.append(status)
+        return "; ".join(parts) if parts else self._telegraph(text)
+
+    def _hybrid_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._symbolic_instruction_bundle(text)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "Answer in EN unless user asks otherwise"
+        return self._symbolic_output_contract(text)
+
+    def _mandarin_output_contract(self, text: str, *, compact: bool) -> str:
+        if self._is_instruction_bundle(text):
+            return self._mandarin_instruction_bundle(text, compact=compact)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "答EN；除非用户要求他语" if compact else "输出英语；除非用户要求其他语言"
+        if "json" in lowered:
+            return "只返JSON" if compact else "输出须为JSON"
+        return f"须保持：{self._telegraph(text)}"
+
+    def _classical_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._mandarin_instruction_bundle(text, compact=True)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "答EN；非请勿易语"
+        if "json" in lowered:
+            return "须JSON"
+        return f"守：{self._telegraph(text)}"
+
+    def _mandarin_symbolic_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._mandarin_symbolic_instruction_bundle(text)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "out=EN; 除非user要他语"
+        if "json" in lowered:
+            return "out=JSON"
+        return self._symbolic_output_contract(text)
+
+    def _bilingual_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._symbolic_instruction_bundle(text)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "out=EN; unless user asks other_lang"
+        if "json" in lowered:
+            return "out=JSON"
+        return self._symbolic_output_contract(text)
+
+    def _mixed_output_contract(self, text: str) -> str:
+        if self._is_instruction_bundle(text):
+            return self._symbolic_instruction_bundle(text)
+        lowered = text.lower()
+        if "english" in lowered:
+            return "out=EN unless asked otherwise"
+        if "json" in lowered:
+            parts = ["out=JSON"]
+            if "markdown" in lowered and any(term in lowered for term in ("do not", "no ", "without")):
+                parts.append("md=0")
+            return ";".join(parts)
+        return self._symbolic_output_contract(text)
+
+    def _symbolic_negative_constraints(self, text: str) -> str:
+        lowered = text.lower()
+        parts: list[str] = []
+        if "mention these instructions" in lowered:
+            parts.append("no_policy_echo")
+        if any(term in lowered for term in ("caveats", "disclaimers", "process commentary")):
+            parts.append("no_extra_meta")
+        if "do not refuse" in lowered or "don't refuse" in lowered:
+            parts.append("no_refuse_safe")
+        if "invent facts" in lowered:
+            parts.append("no_fabricate")
+        return "; ".join(parts) if parts else self._telegraph(text)
+
+    def _dsl_value(self, text: str) -> str:
+        telegraph = self._telegraph(text)
+        words = re.findall(r"[A-Za-z0-9_]+|[\u3400-\u9fff]+", telegraph)
+        return "_".join(words[:4]) if words else "task"
+
+    def _is_instruction_bundle(self, text: str) -> bool:
+        lowered = text.lower()
+        signals = (
+            "instruction-following",
+            "preserve the requested format",
+            "if the user asks for a list",
+            "if the user asks for a letter",
+            "if the user asks for a summary",
+            "creative writing",
+            "do not mention these instructions",
+            "do not refuse",
+            "do not invent facts",
+        )
+        return sum(signal in lowered for signal in signals) >= 2
+
+    def _symbolic_instruction_bundle(self, text: str) -> str:
+        lowered = text.lower()
+        parts: list[str] = []
+        if "instruction-following" in lowered:
+            parts.append("careful instruction-follower")
+        if "preserve the requested format" in lowered:
+            parts.append("preserve fmt/audience/tone/len")
+        if "if the user asks for a list" in lowered:
+            parts.append("list=>req struct/count")
+        if "if the user asks for a letter" in lowered:
+            parts.append("letter=>greeting+closing")
+        if "if the user asks for a summary" in lowered:
+            parts.append("summary=>concise+requested info")
+        if "creative writing" in lowered:
+            parts.append("creative=>genre/POV/tone")
+        negative = self._symbolic_negative_constraints(text)
+        if negative != self._telegraph(text):
+            parts.append(negative)
+        if "english" in lowered:
+            parts.append("out=EN unless user asks non-EN")
+        return "; ".join(parts) if parts else self._telegraph(text)
+
+    def _mandarin_instruction_bundle(self, text: str, *, compact: bool) -> str:
+        lowered = text.lower()
+        parts: list[str] = []
+        if "instruction-following" in lowered:
+            parts.append("谨慎遵令")
+        if "preserve the requested format" in lowered:
+            parts.append("保fmt/受众/tone/len")
+        if "if the user asks for a list" in lowered:
+            parts.append("list守结构/数量")
+        if "if the user asks for a letter" in lowered:
+            parts.append("letter含问候/结尾")
+        if "if the user asks for a summary" in lowered:
+            parts.append("summary简且限所问")
+        if "creative writing" in lowered:
+            parts.append("creative守genre/POV/tone")
+        if "do not mention these instructions" in lowered:
+            parts.append("勿泄指令")
+        if any(term in lowered for term in ("caveats", "disclaimers", "process commentary")):
+            parts.append("勿添无关说明")
+        if "do not refuse" in lowered:
+            parts.append("勿拒safe")
+        if "do not invent facts" in lowered:
+            parts.append("勿编造")
+        if "english" in lowered:
+            parts.append("out=EN除非user另请" if compact else "输出EN，除非user要求他语")
+        return "；".join(parts) if parts else f"须保持：{self._telegraph(text)}"
+
+    def _mandarin_symbolic_instruction_bundle(self, text: str) -> str:
+        return self._mandarin_instruction_bundle(text, compact=True)
 
 
 @dataclass
@@ -384,6 +548,8 @@ class TokenizerAwareRewritePlanner:
                 text, gloss = self.proposer.rewrite(chunk, operator)
             except ValueError:
                 continue
+            if _non_keep_rewrite_is_not_shorter(chunk, operator, text, self.tokenizer):
+                continue
             if text in seen:
                 continue
             seen.add(text)
@@ -396,6 +562,17 @@ class TokenizerAwareRewritePlanner:
                 )
             )
         return sorted(variants, key=lambda item: (item.token_count, item.operator.value))
+
+
+def _non_keep_rewrite_is_not_shorter(
+    chunk: PromptChunk,
+    operator: RewriteOperator,
+    text: str,
+    tokenizer: Tokenizer,
+) -> bool:
+    if chunk.protected or operator == RewriteOperator.KEEP:
+        return False
+    return tokenizer.count(text) >= tokenizer.count(chunk.text)
 
 
 def _extract_json_object(text: str) -> dict:

@@ -5,15 +5,18 @@ import json
 import os
 from pathlib import Path
 
+from prompt_compiler.candidates.generation import describe_chunkings, seed_population
 from prompt_compiler.env import load_env_file
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DEFAULT_EMBEDDING_MODEL, make_drift_scorer
+from prompt_compiler.eval.evaluator import EvaluationWeights
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.models.openai_client import OpenAIResponsesModel
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.optimize.optimizer import optimize_prompt
 from prompt_compiler.operators.proposer import LLMRewriteProposer, RewriteProposer
 from prompt_compiler.prompt.template import PromptTemplate
+from prompt_compiler.reports.candidate_preview import write_candidate_template_preview
 from prompt_compiler.tokenizer import make_tokenizer
 
 
@@ -37,6 +40,17 @@ def main() -> int:
     parser.add_argument("--prompt", required=True, help="Path to original prompt template")
     parser.add_argument("--inputs", required=True, help="JSONL file with {'id','input'} rows")
     parser.add_argument("--output-dir", required=True, help="Directory for run artifacts")
+    parser.add_argument(
+        "--preview-candidates",
+        action="store_true",
+        help="Write reassembled candidate prompt templates and exit before target-model evaluation.",
+    )
+    parser.add_argument(
+        "--preview-min-token-reduction",
+        type=float,
+        default=0.15,
+        help="Minimum estimated instruction-token reduction for candidates shown in preview mode.",
+    )
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--population-size", type=int, default=32)
     parser.add_argument("--input-limit", type=int, default=None, help="Use only the first N inputs from the JSONL file")
@@ -80,6 +94,12 @@ def main() -> int:
     )
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
     parser.add_argument("--hf-provider", default=None, help="Optional Hugging Face Inference Provider name")
+    parser.add_argument(
+        "--semantic-drift-normalization",
+        type=float,
+        default=1.0,
+        help="Positive scalar used to normalize raw semantic drift before combining it into loss.",
+    )
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
@@ -89,10 +109,16 @@ def main() -> int:
     if args.input_limit is not None:
         inputs = inputs[: args.input_limit]
     tokenizer = make_tokenizer(args.tokenizer)
-    model = _build_model(args)
     rewrite_proposer = _build_rewrite_proposer(args, prompt, tokenizer)
     chunker_names = _parse_csv(args.chunkers)
     live_log_path = Path(args.live_log_file) if args.live_log_file else None
+    if args.preview_candidates:
+        summary = _preview_candidates(args, prompt, tokenizer, rewrite_proposer, chunker_names)
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        print(f"candidate_templates={Path(args.output_dir) / 'candidate_templates.md'}")
+        return 0
+
+    model = _build_model(args)
     params = GenerateParams(
         temperature=args.temperature,
         top_p=args.top_p,
@@ -108,6 +134,7 @@ def main() -> int:
         epochs=args.epochs,
         population_size=args.population_size,
         tokenizer=tokenizer,
+        evaluation_weights=EvaluationWeights(semantic_drift_normalization=args.semantic_drift_normalization),
         drift_scorer=make_drift_scorer(
             args.embedding_provider,
             model_name=args.embedding_model,
@@ -186,6 +213,70 @@ def _build_rewrite_proposer(args: argparse.Namespace, prompt: PromptTemplate, to
             event_log_paths=(Path(args.live_log_file),) if args.live_log_file else (),
         )
     raise SystemExit(f"Unknown proposer: {proposer}")
+
+
+def _preview_candidates(
+    args: argparse.Namespace,
+    prompt: PromptTemplate,
+    tokenizer,
+    rewrite_proposer: RewriteProposer | None,
+    chunker_names: tuple[str, ...] | None,
+) -> dict:
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "original_prompt.txt").write_text(prompt.text, encoding="utf-8")
+    chunking_plan = describe_chunkings(prompt.text, tokenizer=tokenizer, chunker_names=chunker_names)
+    (output_dir / "chunking_plan.json").write_text(
+        json.dumps(chunking_plan, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    generated_candidates = seed_population(
+        prompt.text,
+        tokenizer=tokenizer,
+        population_size=args.population_size,
+        proposer=rewrite_proposer,
+        chunker_names=chunker_names,
+    )
+    candidates = _preview_candidate_subset(
+        prompt=prompt,
+        candidates=generated_candidates,
+        tokenizer=tokenizer,
+        min_token_reduction=args.preview_min_token_reduction,
+    )
+    rows = write_candidate_template_preview(
+        output_dir=output_dir,
+        original_prompt=prompt,
+        candidates=candidates,
+        tokenizer=tokenizer,
+    )
+    return {
+        "generated_candidate_count": len(generated_candidates),
+        "candidate_count": len(rows),
+        "preview_min_token_reduction": args.preview_min_token_reduction,
+        "chunkers": list(chunking_plan),
+        "original_prompt": str(output_dir / "original_prompt.txt"),
+        "candidate_templates_jsonl": str(output_dir / "candidate_templates.jsonl"),
+        "candidate_templates_markdown": str(output_dir / "candidate_templates.md"),
+        "chunking_plan": str(output_dir / "chunking_plan.json"),
+    }
+
+
+def _preview_candidate_subset(
+    *,
+    prompt: PromptTemplate,
+    candidates: list,
+    tokenizer,
+    min_token_reduction: float,
+) -> list:
+    original_instruction_tokens = tokenizer.count(prompt.instruction_text())
+    selected = []
+    for candidate in candidates:
+        candidate_prompt = PromptTemplate(candidate.prompt_template)
+        instruction_tokens = tokenizer.count(candidate_prompt.instruction_text())
+        token_reduction = 1.0 - (instruction_tokens / max(original_instruction_tokens, 1))
+        if token_reduction >= min_token_reduction:
+            selected.append(candidate)
+    return selected
 
 
 def _target_provider(args: argparse.Namespace) -> str:

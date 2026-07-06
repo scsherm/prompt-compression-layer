@@ -12,7 +12,7 @@ from prompt_compiler.data.dataset_builder import InputExample, ReferenceExample,
 from prompt_compiler.data.splits import split_dataset
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DriftScorer
-from prompt_compiler.eval.evaluator import CandidateReport, Evaluator
+from prompt_compiler.eval.evaluator import CandidateReport, EvaluationWeights, Evaluator
 from prompt_compiler.eval.pareto import compute_pareto_frontier
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.observability import RunLogger
@@ -29,10 +29,15 @@ class EvaluationReport:
     original_instruction_tokens: int
     best_instruction_tokens: int
     token_reduction: float
+    semantic_drift_normalization: float
     dev_semantic_drift: float
+    dev_normalized_semantic_drift: float
+    dev_loss: float
     dev_format_failure_rate: float
     dev_task_failure_rate: float
     holdout_semantic_drift: float | None
+    holdout_normalized_semantic_drift: float | None
+    holdout_loss: float | None
     holdout_format_failure_rate: float | None
     holdout_task_failure_rate: float | None
     train_size: int
@@ -49,6 +54,8 @@ class EvaluationReport:
         data = asdict(self)
         data["diagnostics"] = [asdict(item) for item in self.diagnostics]
         data["validation_semantic_drift"] = self.dev_semantic_drift
+        data["validation_normalized_semantic_drift"] = self.dev_normalized_semantic_drift
+        data["validation_loss"] = self.dev_loss
         data["format_failure_rate"] = self.dev_format_failure_rate
         data["task_failure_rate"] = self.dev_task_failure_rate
         return data
@@ -75,6 +82,7 @@ def optimize_prompt(
     population_size: int = 32,
     tokenizer: Tokenizer | None = None,
     output_contract: OutputContract | None = None,
+    evaluation_weights: EvaluationWeights | None = None,
     drift_scorer: DriftScorer | None = None,
     params: GenerateParams | None = None,
     rewrite_proposer: RewriteProposer | None = None,
@@ -100,6 +108,7 @@ def optimize_prompt(
         max_concurrency=max_concurrency,
         generation_params=params,
         chunkers=chunker_names,
+        semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
     )
 
     logger.event("reference_build_start", example_count=len(normalized_inputs))
@@ -127,7 +136,12 @@ def optimize_prompt(
         holdout_size=len(holdout_set),
     )
     original_instruction_tokens = tokenizer.count(original_prompt.instruction_text())
-    evaluator = Evaluator(tokenizer=tokenizer, output_contract=output_contract, drift_scorer=drift_scorer)
+    evaluator = Evaluator(
+        tokenizer=tokenizer,
+        output_contract=output_contract,
+        weights=evaluation_weights,
+        drift_scorer=drift_scorer,
+    )
     chunking_plan = describe_chunkings(original_prompt.text, tokenizer=tokenizer, chunker_names=chunker_names)
     logger.event(
         "chunking_plan",
@@ -252,10 +266,15 @@ def optimize_prompt(
         original_instruction_tokens=original_instruction_tokens,
         best_instruction_tokens=best.instruction_tokens,
         token_reduction=best.token_reduction,
+        semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
         dev_semantic_drift=best.avg_semantic_drift,
+        dev_normalized_semantic_drift=best.avg_normalized_semantic_drift,
+        dev_loss=best.objective_score,
         dev_format_failure_rate=best.format_failure_rate,
         dev_task_failure_rate=best.task_failure_rate,
         holdout_semantic_drift=best_holdout.avg_semantic_drift if best_holdout else None,
+        holdout_normalized_semantic_drift=best_holdout.avg_normalized_semantic_drift if best_holdout else None,
+        holdout_loss=best_holdout.objective_score if best_holdout else None,
         holdout_format_failure_rate=best_holdout.format_failure_rate if best_holdout else None,
         holdout_task_failure_rate=best_holdout.task_failure_rate if best_holdout else None,
         train_size=len(split.train),
@@ -282,8 +301,13 @@ def optimize_prompt(
         "run_done",
         best_candidate_id=best.candidate_id,
         token_reduction=round(best.token_reduction, 6),
+        semantic_drift_normalization=evaluation_report.semantic_drift_normalization,
         dev_semantic_drift=round(best.avg_semantic_drift, 6),
+        dev_normalized_semantic_drift=round(best.avg_normalized_semantic_drift, 6),
+        dev_loss=round(best.objective_score, 6),
         holdout_semantic_drift=round(best_holdout.avg_semantic_drift, 6) if best_holdout else None,
+        holdout_normalized_semantic_drift=round(best_holdout.avg_normalized_semantic_drift, 6) if best_holdout else None,
+        holdout_loss=round(best_holdout.objective_score, 6) if best_holdout else None,
         usage_summary=evaluation_report.usage_summary,
         estimated_cost_usd=evaluation_report.estimated_cost_usd,
     )
@@ -386,6 +410,7 @@ def _evaluate_one(
         instruction_tokens=report.instruction_tokens,
         token_reduction=round(report.token_reduction, 6),
         avg_semantic_drift=round(report.avg_semantic_drift, 6),
+        avg_normalized_semantic_drift=round(report.avg_normalized_semantic_drift, 6),
         objective_score=round(report.objective_score, 6),
         format_failure_rate=round(report.format_failure_rate, 6),
         task_failure_rate=round(report.task_failure_rate, 6),

@@ -7,7 +7,7 @@ from typing import Iterable
 
 from prompt_compiler.candidates.candidate import Candidate
 from prompt_compiler.eval.contract_checks import OutputContract
-from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer
+from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer, normalize_distance
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.tokenizer import Tokenizer
@@ -15,8 +15,9 @@ from prompt_compiler.tokenizer import Tokenizer
 
 @dataclass(frozen=True)
 class EvaluationWeights:
-    token: float = 0.20
-    embedding: float = 0.20
+    token: float = 0.50
+    embedding: float = 0.50
+    semantic_drift_normalization: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class FailureCase:
 class OutputComparison:
     input_id: str
     semantic_drift: float
+    normalized_semantic_drift: float
     equivalence_distance: float
     contract_ok: bool
     task_ok: bool
@@ -47,6 +49,7 @@ class CandidateOutputRecord:
     candidate_output: str
     equivalence_distance: float
     semantic_drift: float
+    normalized_semantic_drift: float
     model: str
     usage: dict[str, int] | None = None
     metadata: dict | None = None
@@ -67,6 +70,8 @@ class CandidateReport:
     operator_summary: dict[str, int]
     usage_summary: dict[str, int] = field(default_factory=dict)
     output_records: list[CandidateOutputRecord] = field(default_factory=list)
+    avg_normalized_semantic_drift: float = 0.0
+    normalized_token_reduction: float = 0.0
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -91,6 +96,7 @@ class Evaluator:
     def compare_outputs(self, candidate_output: str, reference_output: str, input_id: str) -> OutputComparison:
         contract_result = self.output_contract.validate(candidate_output)
         semantic_drift = self.drift_scorer.distance(candidate_output, reference_output)
+        normalized_semantic_drift = _normalize_drift(semantic_drift, self.drift_scorer, self.weights)
         task_ok = _task_equivalent(candidate_output, reference_output)
 
         failures: list[FailureCase] = []
@@ -115,11 +121,12 @@ class Evaluator:
                 )
             )
 
-        equivalence_distance = self.weights.embedding * semantic_drift
+        equivalence_distance = normalized_semantic_drift
 
         return OutputComparison(
             input_id=input_id,
             semantic_drift=semantic_drift,
+            normalized_semantic_drift=normalized_semantic_drift,
             equivalence_distance=equivalence_distance,
             contract_ok=contract_result.ok,
             task_ok=task_ok,
@@ -154,6 +161,7 @@ class Evaluator:
                     candidate_output=response.text,
                     equivalence_distance=comparison.equivalence_distance,
                     semantic_drift=comparison.semantic_drift,
+                    normalized_semantic_drift=comparison.normalized_semantic_drift,
                     model=response.model,
                     usage=response.usage,
                     metadata=response.metadata,
@@ -162,6 +170,7 @@ class Evaluator:
 
         instruction_tokens = self.tokenizer.count(prompt.instruction_text())
         token_reduction = 1.0 - (instruction_tokens / max(original_instruction_tokens, 1))
+        normalized_token_reduction = _clamp(token_reduction)
         failures = [failure for comparison in comparisons for failure in comparison.failures]
         count = max(len(comparisons), 1)
         operator_summary: dict[str, int] = {}
@@ -170,17 +179,21 @@ class Evaluator:
             operator_summary[key] = operator_summary.get(key, 0) + 1
 
         avg_drift = mean([comparison.semantic_drift for comparison in comparisons]) if comparisons else 1.0
-        token_ratio = instruction_tokens / max(original_instruction_tokens, 1)
-        avg_equivalence_distance = (
-            mean([comparison.equivalence_distance for comparison in comparisons]) if comparisons else self.weights.embedding
+        avg_normalized_drift = (
+            mean([comparison.normalized_semantic_drift for comparison in comparisons]) if comparisons else 1.0
         )
-        objective_score = self.weights.token * token_ratio + avg_equivalence_distance
+        objective_score = _weighted_loss(
+            token_loss=1.0 - normalized_token_reduction,
+            normalized_semantic_drift=avg_normalized_drift,
+            weights=self.weights,
+        )
 
         return CandidateReport(
             candidate_id=candidate.id,
             prompt_template=candidate.prompt_template,
             instruction_tokens=instruction_tokens,
             token_reduction=token_reduction,
+            normalized_token_reduction=normalized_token_reduction,
             avg_semantic_drift=avg_drift,
             objective_score=objective_score,
             format_failure_rate=sum(not item.contract_ok for item in comparisons) / count,
@@ -190,6 +203,7 @@ class Evaluator:
             operator_summary=operator_summary,
             usage_summary=usage_summary,
             output_records=output_records,
+            avg_normalized_semantic_drift=avg_normalized_drift,
         )
 
 
@@ -217,3 +231,25 @@ def _add_usage(total: dict[str, int], usage: dict[str, int] | None) -> None:
     for key, value in usage.items():
         if isinstance(value, int):
             total[key] = total.get(key, 0) + value
+
+
+def _normalize_drift(semantic_drift: float, scorer: DriftScorer, weights: EvaluationWeights) -> float:
+    if getattr(scorer, "name", "") == "embedding_euclidean":
+        return normalize_distance(semantic_drift, weights.semantic_drift_normalization)
+    return _clamp(semantic_drift)
+
+
+def _weighted_loss(
+    *,
+    token_loss: float,
+    normalized_semantic_drift: float,
+    weights: EvaluationWeights,
+) -> float:
+    weight_sum = weights.token + weights.embedding
+    if weight_sum <= 0.0:
+        return 1.0
+    return ((weights.token * token_loss) + (weights.embedding * normalized_semantic_drift)) / weight_sum
+
+
+def _clamp(value: float) -> float:
+    return min(max(value, 0.0), 1.0)

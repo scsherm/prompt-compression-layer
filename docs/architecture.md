@@ -50,7 +50,7 @@ flowchart TD
     I --> EV["Candidate evaluation"]
     SPLIT --> EV
     TM2["Target model M"] --> EV
-    EV --> REP["Candidate reports"]
+    EV --> REP["Candidate reports with normalized loss"]
     REP --> PF["Pareto frontier"]
     PF --> OPT["Epoch optimizer"]
     OPT --> E
@@ -125,11 +125,22 @@ The optimization objective is the tradeoff between prompt compression and genera
 - token reduction
 - Euclidean embedding drift
 
-Optional equivalence scorers can add additional output-distance signals:
+Embedding drift is computed as raw Euclidean distance over completion embeddings. The scalar loss normalizes the resulting metric values before combining them:
 
-- separate LLM judge disagreement
-- ROUGE distance
-- BLEU distance
+```text
+token_reduction_norm = clamp(token_reduction, 0, 1)
+token_loss_norm = 1 - token_reduction_norm
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
+loss = weighted_average(token_loss_norm, semantic_drift_norm)
+```
+
+With the default equal weights:
+
+```text
+loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
+```
+
+The scalar loss is bounded to `[0, 1]`, and lower is better.
 
 Validity and audit signals are tracked separately:
 
@@ -138,8 +149,9 @@ Validity and audit signals are tracked separately:
 - failure cases
 - candidate output records
 - model usage
+- meta-structure leakage flags in experiment reports
 
-Embedding drift uses Euclidean distance over generated completions. Mixedbread embeddings are supported through `sentence-transformers` or Hugging Face Inference.
+These validation signals do not contribute to the scalar loss; they identify candidates that may need filtering or manual inspection. Mixedbread embeddings are supported through `sentence-transformers` or Hugging Face Inference.
 
 ### Optimizer Layer
 
@@ -206,3 +218,14 @@ LLM proposer traces are written to:
 ```
 
 These traces include the rendered proposer prompt, proposer response, parsed JSON, rewritten chunk, usage, metadata, and validation status.
+
+Candidate preview runs can stop after assembly and write:
+
+```text
+<output-dir>/original_prompt.txt
+<output-dir>/chunking_plan.json
+<output-dir>/candidate_templates.jsonl
+<output-dir>/candidate_templates.md
+```
+
+These files are useful for inspecting reassembled templates and placeholder preservation before running target-model candidate completions.

@@ -18,12 +18,12 @@ class EvaluatorAndOptimizerTests(unittest.TestCase):
             name = "fake"
 
             def embed(self, texts):
-                return [[1.0, 0.0], [0.0, 1.0]]
+                return [[2.0, 0.0], [0.0, 1.0]]
 
         scorer = EmbeddingDriftScorer(FakeEmbeddingClient())
 
         self.assertEqual(euclidean_distance([1.0, 0.0], [1.0, 0.0]), 0.0)
-        self.assertAlmostEqual(scorer.distance("a", "b"), 2**0.5)
+        self.assertAlmostEqual(scorer.distance("a", "b"), 5**0.5)
 
     def test_invalid_json_is_reported_separately_from_equivalence_distance(self):
         evaluator = Evaluator(tokenizer=ApproxTokenizer(), output_contract=OutputContract(require_json=True))

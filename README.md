@@ -24,8 +24,8 @@ objective: reduce instruction tokens while preserving target-model behavior
 5. Use rewrite operators to produce candidate chunk variants.
 6. Assemble candidate prompt templates while preserving the original placeholder sequence.
 7. Run each candidate through the target model on the current evaluation subset.
-8. Score candidates by instruction-token reduction and Euclidean embedding drift, with optional equivalence scorers such as an LLM judge, ROUGE, or BLEU.
-9. Keep a Pareto frontier, generate the next population from frontier candidates, then evaluate finalists on dev and holdout sets.
+8. Score candidates with a normalized loss that combines semantic drift and token loss.
+9. Track validation checks separately from the loss, keep a Pareto frontier, generate the next population from frontier candidates, then evaluate finalists on dev and holdout sets.
 10. Write prompts, traces, reports, frontier files, candidate outputs, and run logs to disk.
 
 ## Model Roles
@@ -155,10 +155,13 @@ OpenAI target model with OpenAI proposer and Mixedbread embeddings:
 
 Useful CLI controls:
 
+- `--preview-candidates`: write reassembled candidate prompt templates and exit before target-model evaluation
+- `--preview-min-token-reduction`: minimum estimated instruction-token reduction for previewed candidates, default `0.15`
 - `--chunkers`: comma-separated chunkers, default `paragraph,sentence,markdown,schema_aware`
 - `--live-log-file`: stable JSONL mirror for `tail -f`, default `runs/live_run_events.jsonl`
 - `--max-concurrency`: maximum concurrent candidate evaluations
 - `--input-limit`: use the first N rows from the input JSONL
+- `--semantic-drift-normalization`: positive scalar used to normalize raw semantic drift before combining it into loss
 - `--send-openai-sampling-params`: sends `temperature` and `top_p` to OpenAI Responses for endpoints that support them
 
 ## Tokenizers
@@ -177,11 +180,19 @@ Rendered prompt token counts are also tracked because long inputs can dominate t
 
 ## Embedding Drift
 
-Embedding drift is Euclidean distance over completion embeddings:
+Embedding drift is raw Euclidean distance over completion embeddings in the configured embedding model's vector space:
 
 ```text
-drift = || embed(candidate_output) - embed(reference_output) ||_2
+semantic_drift = || embed(candidate_output) - embed(reference_output) ||_2
 ```
+
+The semantic-drift score is normalized after distance is computed:
+
+```text
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
+```
+
+`semantic_drift_normalization` is an explicit scalar for the embedding model and evaluation context, such as the maximum observed raw drift in a candidate-comparison run.
 
 Supported providers:
 
@@ -204,17 +215,24 @@ maximize token_reduction
 minimize embedding_drift
 ```
 
-When a scalar objective is useful, use token ratio plus Euclidean embedding drift:
+The scalar loss is a normalized minimize objective:
 
 ```text
-objective = lambda_token * token_ratio + lambda_embed * embedding_drift
+token_reduction = 1 - candidate_instruction_tokens / original_instruction_tokens
+token_reduction_norm = clamp(token_reduction, 0, 1)
+token_loss_norm = 1 - token_reduction_norm
+semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
+
+loss = weighted_average(token_loss_norm, semantic_drift_norm)
 ```
 
-Optional equivalence signals can be added as additional output-distance terms:
+With the default equal weights:
 
-- separate LLM judge disagreement
-- ROUGE distance
-- BLEU distance
+```text
+loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
+```
+
+The loss is in `[0, 1]`; lower is better. `objective_score` in candidate reports is this normalized loss.
 
 Structured output validity is tracked separately from the scalar objective:
 
@@ -223,6 +241,44 @@ Structured output validity is tracked separately from the scalar objective:
 - failure cases
 
 Those validity signals describe whether a candidate output remains usable by the downstream contract. They are not output-equivalence distance terms.
+
+## Current Checkpoint
+
+The current verified checkpoint is the no-robots rich-prompt candidate run:
+
+```text
+candidate run: runs/no_robots_llm_prompt_v3
+side-by-side run: runs/no_robots_llm_prompt_v3_side_by_side_v3
+proposer model: gpt-5.4-mini-2026-03-17
+target model: gpt-5-nano-2025-08-07
+embedding model: mixedbread-ai/mxbai-embed-large-v1
+```
+
+Run shape:
+
+- 24 proposer chunk rewrites saved in `proposer_traces.jsonl`
+- 6 candidate prompt templates saved in `candidate_templates.jsonl`
+- 3 inputs evaluated
+- 3 original-prompt reference completions
+- 18 candidate-prompt completions
+
+Verification artifacts:
+
+- `runs/no_robots_llm_prompt_v3_side_by_side_v3/provenance_audit.md`
+- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_proposer_retrieval_audit.json`
+- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_response_retrieval_audit.json`
+- `runs/no_robots_llm_prompt_v3_side_by_side_v3/loss_metrics.md`
+
+Candidate ranking from the checkpoint:
+
+| rank | candidate | token reduction | normalized drift | loss | validation note |
+|---:|---:|---:|---:|---:|---|
+| 1 | 4 | 0.399 | 0.598 | 0.599 | clear |
+| 2 | 3 | 0.416 | 0.616 | 0.600 | clear |
+| 3 | 1 | 0.347 | 0.577 | 0.615 | clear |
+| 4 | 5 | 0.387 | 0.669 | 0.641 | clear |
+| 5 | 2 | 0.382 | 0.686 | 0.652 | clear |
+| 6 | 6 | 0.295 | 0.728 | 0.717 | leaked meta structure |
 
 ## Hugging Face Data
 

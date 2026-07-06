@@ -52,10 +52,16 @@ def seed_population(
     chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names)
 
     for chunker_name, chunks in chunkings:
-        _append_unique(
+        _append_candidate_if_valid(
             population,
             seen_prompts,
-            _candidate_from_uniform_operator(chunker_name, chunks, RewriteOperator.KEEP, tokenizer, planner),
+            lambda chunker_name=chunker_name, chunks=chunks: _candidate_from_uniform_operator(
+                chunker_name,
+                chunks,
+                RewriteOperator.KEEP,
+                tokenizer,
+                planner,
+            ),
         )
         if len(population) >= population_size:
             return population
@@ -63,10 +69,16 @@ def seed_population(
     for operator in BROAD_OPERATORS[1:]:
         added_for_operator = False
         for chunker_name, chunks in chunkings:
-            added_for_operator = _append_unique(
+            added_for_operator = _append_candidate_if_valid(
                 population,
                 seen_prompts,
-                _candidate_from_uniform_operator(chunker_name, chunks, operator, tokenizer, planner),
+                lambda chunker_name=chunker_name, chunks=chunks, operator=operator: _candidate_from_uniform_operator(
+                    chunker_name,
+                    chunks,
+                    operator,
+                    tokenizer,
+                    planner,
+                ),
             ) or added_for_operator
             if added_for_operator:
                 break
@@ -75,16 +87,31 @@ def seed_population(
 
     for operator in BROAD_OPERATORS[1:]:
         for chunker_name, chunks in chunkings:
-            _append_unique(
+            _append_candidate_if_valid(
                 population,
                 seen_prompts,
-                _candidate_from_uniform_operator(chunker_name, chunks, operator, tokenizer, planner),
+                lambda chunker_name=chunker_name, chunks=chunks, operator=operator: _candidate_from_uniform_operator(
+                    chunker_name,
+                    chunks,
+                    operator,
+                    tokenizer,
+                    planner,
+                ),
             )
             if len(population) >= population_size:
                 return population
 
     for chunker_name, chunks in chunkings:
-        _append_unique(population, seen_prompts, _candidate_from_min_tokens(chunker_name, chunks, tokenizer, planner))
+        _append_candidate_if_valid(
+            population,
+            seen_prompts,
+            lambda chunker_name=chunker_name, chunks=chunks: _candidate_from_min_tokens(
+                chunker_name,
+                chunks,
+                tokenizer,
+                planner,
+            ),
+        )
         if len(population) >= population_size:
             return population
     return population[:population_size]
@@ -284,3 +311,11 @@ def _append_unique(population: list[Candidate], seen_prompts: set[str], candidat
     seen_prompts.add(candidate.prompt_template)
     population.append(candidate)
     return True
+
+
+def _append_candidate_if_valid(population: list[Candidate], seen_prompts: set[str], build_candidate) -> bool:
+    try:
+        candidate = build_candidate()
+    except CandidateBuildError:
+        return False
+    return _append_unique(population, seen_prompts, candidate)

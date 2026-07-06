@@ -132,8 +132,18 @@ def euclidean_distance(a: list[float], b: list[float]) -> float:
     return sum((left - right) ** 2 for left, right in zip(a, b)) ** 0.5
 
 
+def normalize_distance(distance: float, scale: float) -> float:
+    if scale <= 0.0:
+        return 1.0
+    return _clamp(distance / scale)
+
+
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[\u3400-\u9fff]|[A-Za-z0-9_]+", text.lower())
+
+
+def _clamp(value: float) -> float:
+    return min(max(value, 0.0), 1.0)
 
 
 def _to_vector_list(value) -> list:
