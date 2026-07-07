@@ -92,18 +92,6 @@ conda env create -f environment.yml
 conda activate prompt-compression-layer
 ```
 
-The environment used on this machine is:
-
-```text
-/Users/scsherm/anaconda3/envs/prompt-compression-layer
-```
-
-If `conda run` resolves the wrong interpreter, use the direct Python path:
-
-```bash
-/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python
-```
-
 Pip-only setup:
 
 ```bash
@@ -133,7 +121,7 @@ python3 -m prompt_compiler.cli \
 OpenAI target model with OpenAI proposer and Mixedbread embeddings:
 
 ```bash
-/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python -m prompt_compiler.cli \
+python3 -m prompt_compiler.cli \
   --provider openai \
   --model gpt-5-nano-2025-08-07 \
   --proposer openai \
@@ -291,8 +279,7 @@ data/hf/no_robots_100.jsonl
 Refresh it with:
 
 ```bash
-/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python \
-  scripts/download_instruction_dataset.py \
+python3 scripts/download_instruction_dataset.py \
   --dataset HuggingFaceH4/no_robots \
   --config default \
   --split train \

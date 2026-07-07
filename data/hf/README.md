@@ -28,8 +28,7 @@ Normalized row fields:
 Refresh the sample:
 
 ```bash
-/Users/scsherm/anaconda3/envs/prompt-compression-layer/bin/python \
-  scripts/download_instruction_dataset.py \
+python3 scripts/download_instruction_dataset.py \
   --dataset HuggingFaceH4/no_robots \
   --config default \
   --split train \
