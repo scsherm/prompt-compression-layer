@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from prompt_compiler.candidates.generation import describe_chunkings, seed_population
+from prompt_compiler.candidates.generation import describe_chunkings, seed_population_with_proposals
 from prompt_compiler.env import load_env_file
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DEFAULT_EMBEDDING_MODEL, make_drift_scorer
@@ -17,10 +17,11 @@ from prompt_compiler.optimize.optimizer import optimize_prompt
 from prompt_compiler.operators.proposer import LLMRewriteProposer, RewriteProposer
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.reports.candidate_preview import write_candidate_template_preview
+from prompt_compiler.reports.proposal_pool import write_proposal_pool
 from prompt_compiler.tokenizer import make_tokenizer
 
 
-DEFAULT_CHUNKERS = "paragraph,sentence,markdown,schema_aware"
+DEFAULT_CHUNKERS = "paragraph,sentence,obligation,markdown,schema_aware"
 DEFAULT_OPENAI_PROPOSER_MODEL = "gpt-5.4-mini-2026-03-17"
 DEFAULT_OPENAI_PROPOSER_REASONING_EFFORT = "medium"
 
@@ -85,7 +86,7 @@ def main() -> int:
         default=DEFAULT_CHUNKERS,
         help=(
             "Comma-separated chunkers to explore. Available: paragraph,sentence,markdown,"
-            "schema_aware,instruction_role,token_window"
+            "obligation,schema_aware,instruction_role,token_window"
         ),
     )
     parser.add_argument(
@@ -93,6 +94,18 @@ def main() -> int:
         type=int,
         default=80,
         help="Max tokenizer tokens per token_window chunker chunk.",
+    )
+    parser.add_argument(
+        "--proposal-attempts",
+        type=int,
+        default=1,
+        help="LLM rewrite attempts per chunk/operator. Attempts after the first use logged proposer jitter.",
+    )
+    parser.add_argument(
+        "--proposal-jitter-seed",
+        type=int,
+        default=0,
+        help="Seed for selecting proposer jitter attempts.",
     )
     parser.add_argument(
         "--live-log-file",
@@ -169,6 +182,8 @@ def main() -> int:
         chunker_names=chunker_names,
         token_window_size=args.token_window_size,
         elitism_count=args.elitism_count,
+        proposal_attempts=args.proposal_attempts,
+        proposal_jitter_seed=args.proposal_jitter_seed,
     )
     print(json.dumps(result.evaluation_report.to_dict(), ensure_ascii=False, indent=2))
     print(f"best_prompt={Path(args.output_dir) / 'best_prompt.txt'}")
@@ -256,14 +271,18 @@ def _preview_candidates(
         json.dumps(chunking_plan, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    generated_candidates = seed_population(
+    seed_result = seed_population_with_proposals(
         prompt.text,
         tokenizer=tokenizer,
         population_size=args.population_size,
         proposer=rewrite_proposer,
         chunker_names=chunker_names,
         token_window_size=args.token_window_size,
+        proposal_attempts=args.proposal_attempts,
+        proposal_jitter_seed=args.proposal_jitter_seed,
     )
+    generated_candidates = seed_result.candidates
+    proposal_paths = write_proposal_pool(output_dir, seed_result.proposal_pools, tokenizer)
     candidates = _preview_candidate_subset(
         prompt=prompt,
         candidates=generated_candidates,
@@ -282,10 +301,13 @@ def _preview_candidates(
         "preview_min_token_reduction": args.preview_min_token_reduction,
         "chunkers": list(chunking_plan),
         "token_window_size": args.token_window_size,
+        "proposal_attempts": args.proposal_attempts,
+        "proposal_jitter_seed": args.proposal_jitter_seed,
         "original_prompt": str(output_dir / "original_prompt.txt"),
         "candidate_templates_jsonl": str(output_dir / "candidate_templates.jsonl"),
         "candidate_templates_markdown": str(output_dir / "candidate_templates.md"),
         "chunking_plan": str(output_dir / "chunking_plan.json"),
+        **proposal_paths,
     }
 
 

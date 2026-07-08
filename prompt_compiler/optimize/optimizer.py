@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, Mapping
 
 from prompt_compiler.candidates.candidate import Candidate
-from prompt_compiler.candidates.generation import describe_chunkings, next_generation_from_frontier, seed_population
+from prompt_compiler.candidates.generation import describe_chunkings, next_generation_from_frontier, seed_population_with_proposals
 from prompt_compiler.data.dataset_builder import InputExample, ReferenceExample, build_reference_dataset, normalize_inputs
 from prompt_compiler.data.splits import split_dataset
 from prompt_compiler.eval.contract_checks import OutputContract
@@ -20,6 +21,7 @@ from prompt_compiler.operators.proposer import RewriteProposer
 from prompt_compiler.optimize.credit_assignment import OperatorDiagnostic, summarize_operator_diagnostics
 from prompt_compiler.optimize.curriculum import curriculum_subset
 from prompt_compiler.prompt.template import PromptTemplate
+from prompt_compiler.reports.proposal_pool import write_proposal_pool
 from prompt_compiler.reports.writer import write_run_artifacts
 from prompt_compiler.tokenizer import ApproxTokenizer, Tokenizer
 
@@ -92,6 +94,8 @@ def optimize_prompt(
     chunker_names: tuple[str, ...] | None = None,
     token_window_size: int = 80,
     elitism_count: int = 1,
+    proposal_attempts: int = 1,
+    proposal_jitter_seed: int = 0,
 ) -> CompressionRunResult:
     tokenizer = tokenizer or ApproxTokenizer()
     params = params or GenerateParams()
@@ -113,6 +117,8 @@ def optimize_prompt(
         chunkers=chunker_names,
         token_window_size=token_window_size,
         elitism_count=elitism_count,
+        proposal_attempts=proposal_attempts,
+        proposal_jitter_seed=proposal_jitter_seed,
         semantic_drift_normalization=(evaluation_weights or EvaluationWeights()).semantic_drift_normalization,
     )
 
@@ -153,6 +159,10 @@ def optimize_prompt(
         chunker_names=chunker_names,
         token_window_size=token_window_size,
     )
+    (output_dir / "chunking_plan.json").write_text(
+        json.dumps(chunking_plan, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     logger.event(
         "chunking_plan",
         active_chunkers=list(chunking_plan),
@@ -165,20 +175,25 @@ def optimize_prompt(
         proposer="llm" if rewrite_proposer else "rule",
         original_instruction_tokens=original_instruction_tokens,
     )
-    population = seed_population(
+    seed_result = seed_population_with_proposals(
         original_prompt.text,
         tokenizer=tokenizer,
         population_size=population_size,
         proposer=rewrite_proposer,
         chunker_names=chunker_names,
         token_window_size=token_window_size,
+        proposal_attempts=proposal_attempts,
+        proposal_jitter_seed=proposal_jitter_seed,
     )
+    population = seed_result.candidates
+    proposal_paths = write_proposal_pool(output_dir, seed_result.proposal_pools, tokenizer)
     candidate_index: dict[str, Candidate] = {candidate.id: candidate for candidate in population}
     logger.event(
         "population_seeded",
         candidate_count=len(population),
         original_instruction_tokens=original_instruction_tokens,
         summary=_population_summary(population),
+        proposal_paths=proposal_paths,
     )
 
     epoch_reports: list[CandidateReport] = []
@@ -218,6 +233,8 @@ def optimize_prompt(
                 chunker_names=chunker_names,
                 frontier_order=frontier_order,
                 elite_ids=elite_ids,
+                proposal_attempts=proposal_attempts,
+                proposal_jitter_seed=proposal_jitter_seed + epoch + 1,
             )
             candidate_index.update({candidate.id: candidate for candidate in population})
             logger.event(

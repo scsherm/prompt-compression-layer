@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import random
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from string import Template
 from typing import Protocol
@@ -19,6 +20,63 @@ class RewriteVariant:
     text: str
     token_count: int
     gloss: str
+    attempt_id: str = "default"
+    jitter: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RewriteAttempt:
+    id: str
+    target_multiplier: float = 1.0
+    aggression: str = "medium"
+    style_hint: str = "Use the operator's default compression style."
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+DEFAULT_REWRITE_ATTEMPT = RewriteAttempt(id="default")
+
+JITTER_ATTEMPT_POOL = (
+    RewriteAttempt(
+        id="compact_symbols",
+        target_multiplier=0.85,
+        aggression="medium",
+        style_hint="Prefer compact operators like =>, ;, /, +, no_*, preserve, unless.",
+    ),
+    RewriteAttempt(
+        id="aggressive_short",
+        target_multiplier=0.70,
+        aggression="aggressive",
+        style_hint="Prefer the shortest clear wording; allow terse grammar and stable abbreviations.",
+    ),
+    RewriteAttempt(
+        id="conservative_exact",
+        target_multiplier=1.10,
+        aggression="conservative",
+        style_hint="Compress less aggressively; preserve explicit wording when ambiguity risk is high.",
+    ),
+    RewriteAttempt(
+        id="abbrev_heavy",
+        target_multiplier=0.80,
+        aggression="medium",
+        style_hint="Favor stable abbreviations such as req, fmt, len, EN, out, info.",
+    ),
+    RewriteAttempt(
+        id="dsl_dense",
+        target_multiplier=0.65,
+        aggression="aggressive",
+        style_hint="Favor compact DSL-like notation with clear keys and constraints.",
+    ),
+)
+
+
+def make_rewrite_attempts(count: int, seed: int = 0) -> tuple[RewriteAttempt, ...]:
+    if count <= 1:
+        return (DEFAULT_REWRITE_ATTEMPT,)
+    pool = list(JITTER_ATTEMPT_POOL)
+    random.Random(seed).shuffle(pool)
+    return (DEFAULT_REWRITE_ATTEMPT, *pool[: max(0, count - 1)])
 
 
 class RewriteProposer(Protocol):
@@ -364,7 +422,7 @@ class LLMRewriteProposer:
         default_factory=lambda: Path(__file__).with_name("llm_chunk_rewrite_prompt.txt")
     )
     fallback: RewriteProposer | None = None
-    _cache: dict[tuple[str, str, str], tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
+    _cache: dict[tuple[str, str, str, str], tuple[str, str]] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.params.response_json_schema:
@@ -376,16 +434,19 @@ class LLMRewriteProposer:
         )
 
     def rewrite(self, chunk: PromptChunk, operator: RewriteOperator) -> tuple[str, str]:
+        return self.rewrite_attempt(chunk, operator, DEFAULT_REWRITE_ATTEMPT)
+
+    def rewrite_attempt(self, chunk: PromptChunk, operator: RewriteOperator, attempt: RewriteAttempt) -> tuple[str, str]:
         if chunk.protected:
             return chunk.text, "protected input slot preserved verbatim"
         if operator == RewriteOperator.KEEP:
             return chunk.text, "original chunk"
 
-        cache_key = (chunk.text, chunk.chunk_type.value, operator.value)
+        cache_key = (chunk.text, chunk.chunk_type.value, operator.value, attempt.id)
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        proposer_prompt = self.render_prompt(chunk, operator)
+        proposer_prompt = self.render_prompt(chunk, operator, attempt=attempt)
         response = self.model.generate(proposer_prompt, self.params)
         parsed = _extract_json_object(response.text)
         rewritten = str(parsed.get("rewritten_chunk", "")).strip()
@@ -403,6 +464,7 @@ class LLMRewriteProposer:
                 usage=response.usage,
                 response_metadata=response.metadata,
                 validation_error=validation_error,
+                attempt=attempt,
             )
             raise ValueError(f"Invalid LLM rewrite for {chunk.id}/{operator.value}: {validation_error}")
 
@@ -418,22 +480,32 @@ class LLMRewriteProposer:
             usage=response.usage,
             response_metadata=response.metadata,
             validation_error=validation_error,
+            attempt=attempt,
         )
         if self.write_rewrite_events:
-            self._write_event(chunk=chunk, operator=operator, result=result, usage=response.usage)
+            self._write_event(chunk=chunk, operator=operator, result=result, usage=response.usage, attempt=attempt)
         return result
 
-    def render_prompt(self, chunk: PromptChunk, operator: RewriteOperator) -> str:
+    def render_prompt(
+        self,
+        chunk: PromptChunk,
+        operator: RewriteOperator,
+        *,
+        attempt: RewriteAttempt = DEFAULT_REWRITE_ATTEMPT,
+    ) -> str:
         template = Template(self.prompt_template_path.read_text(encoding="utf-8"))
         original_tokens = self.tokenizer.count(chunk.text)
+        base_target_tokens = _target_rewrite_tokens(operator, original_tokens)
+        target_tokens = max(1, int(base_target_tokens * attempt.target_multiplier))
         return template.safe_substitute(
             operator=operator.value,
             operator_instruction=_operator_instruction(operator),
             operator_hard_requirements=_operator_hard_requirements(operator),
+            proposal_variation=_proposal_variation_instruction(attempt),
             original_prompt=self.original_prompt,
             chunk_type=chunk.chunk_type.value,
             original_chunk_tokens=original_tokens,
-            target_rewrite_tokens=_target_rewrite_tokens(operator, original_tokens),
+            target_rewrite_tokens=target_tokens,
             chunk_text=chunk.text,
         )
 
@@ -470,6 +542,7 @@ class LLMRewriteProposer:
         usage: dict[str, int] | None,
         response_metadata: dict | None,
         validation_error: str | None,
+        attempt: RewriteAttempt,
     ) -> None:
         if not self.trace_path:
             return
@@ -478,6 +551,7 @@ class LLMRewriteProposer:
             "chunk_id": chunk.id,
             "chunk_type": chunk.chunk_type.value,
             "operator": operator.value,
+            "attempt": attempt.to_dict(),
             "proposer_model": self.model.name,
             "target_model_name": self.target_model_name,
             "proposer_prompt": proposer_prompt,
@@ -499,6 +573,7 @@ class LLMRewriteProposer:
         operator: RewriteOperator,
         result: tuple[str, str],
         usage: dict[str, int] | None,
+        attempt: RewriteAttempt,
     ) -> None:
         paths = self._event_paths()
         if not paths:
@@ -508,6 +583,7 @@ class LLMRewriteProposer:
             "chunk_id": chunk.id,
             "chunk_type": chunk.chunk_type.value,
             "operator": operator.value,
+            "attempt": attempt.to_dict(),
             "rewritten_chunk": result[0],
             "rationale": result[1],
             "usage": usage,
@@ -539,29 +615,36 @@ class TokenizerAwareRewritePlanner:
         self,
         chunk: PromptChunk,
         operators: tuple[RewriteOperator, ...] | None = None,
+        attempts: tuple[RewriteAttempt, ...] | None = None,
     ) -> list[RewriteVariant]:
         operators = operators or tuple(RewriteOperator)
+        attempts = attempts or (DEFAULT_REWRITE_ATTEMPT,)
         variants: list[RewriteVariant] = []
         seen: set[str] = set()
         for operator in operators:
-            try:
-                text, gloss = self.proposer.rewrite(chunk, operator)
-            except ValueError:
-                continue
-            if _non_keep_rewrite_is_not_shorter(chunk, operator, text, self.tokenizer):
-                continue
-            if text in seen:
-                continue
-            seen.add(text)
-            variants.append(
-                RewriteVariant(
-                    operator=operator,
-                    text=text,
-                    token_count=self.tokenizer.count(text),
-                    gloss=gloss,
+            operator_attempts = (DEFAULT_REWRITE_ATTEMPT,) if operator == RewriteOperator.KEEP or chunk.protected else attempts
+            for attempt in operator_attempts:
+                try:
+                    text, gloss = _rewrite_with_attempt(self.proposer, chunk, operator, attempt)
+                except ValueError:
+                    continue
+                if _non_keep_rewrite_is_not_shorter(chunk, operator, text, self.tokenizer):
+                    continue
+                normalized = _normalize_rewrite_text(text)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                variants.append(
+                    RewriteVariant(
+                        operator=operator,
+                        text=text,
+                        token_count=self.tokenizer.count(text),
+                        gloss=gloss,
+                        attempt_id=attempt.id,
+                        jitter=attempt.to_dict(),
+                    )
                 )
-            )
-        return sorted(variants, key=lambda item: (item.token_count, item.operator.value))
+        return sorted(variants, key=lambda item: (item.token_count, item.operator.value, item.attempt_id))
 
 
 def _non_keep_rewrite_is_not_shorter(
@@ -573,6 +656,29 @@ def _non_keep_rewrite_is_not_shorter(
     if chunk.protected or operator == RewriteOperator.KEEP:
         return False
     return tokenizer.count(text) >= tokenizer.count(chunk.text)
+
+
+def _rewrite_with_attempt(
+    proposer: RewriteProposer,
+    chunk: PromptChunk,
+    operator: RewriteOperator,
+    attempt: RewriteAttempt,
+) -> tuple[str, str]:
+    rewrite_attempt = getattr(proposer, "rewrite_attempt", None)
+    if callable(rewrite_attempt):
+        return rewrite_attempt(chunk, operator, attempt)
+    return proposer.rewrite(chunk, operator)
+
+
+def _normalize_rewrite_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _proposal_variation_instruction(attempt: RewriteAttempt) -> str:
+    return (
+        f"attempt_id={attempt.id}; aggression={attempt.aggression}; "
+        f"target_multiplier={attempt.target_multiplier:.2f}; {attempt.style_hint}"
+    )
 
 
 def _extract_json_object(text: str) -> dict:

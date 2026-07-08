@@ -23,6 +23,9 @@ $original_chunk_tokens
 TARGET_MAX_TOKENS:
 $target_rewrite_tokens
 
+PROPOSAL_VARIATION:
+$proposal_variation
+
 FULL_PROMPT is read-only context. It may clarify local meaning, but it is not the source to rewrite.
 SOURCE_CHUNK is the only source for rewritten_chunk.
 
@@ -36,6 +39,7 @@ Compression contract:
 - Compression style is allowed to be terse, symbolic, and not polished prose.
 - Avoid explanatory phrasing when a compact directive preserves the obligation.
 - If SOURCE_CHUNK is a bundle of instructions, compress each obligation; do not keep only one obligation.
+- PROPOSAL_VARIATION changes compression style/budget only. It must not change SOURCE_CHUNK meaning or add/drop obligations.
 
 Preferred compression dialect:
 - Use stable short forms: req=request, fmt=format, len=length, EN=English, out=output, info=information.

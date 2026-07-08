@@ -70,7 +70,7 @@ class RewriteAndParetoTests(unittest.TestCase):
             "Input:\n{{input}}"
         )
 
-        population = seed_population(prompt, ApproxTokenizer(), population_size=16, proposer=CompactTestProposer())
+        population = seed_population(prompt, ApproxTokenizer(), population_size=20, proposer=CompactTestProposer())
         operators = {
             chunk.operator
             for candidate in population

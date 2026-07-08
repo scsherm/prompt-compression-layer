@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 
 from prompt_compiler.candidates.candidate import Candidate, CompressedChunk
 from prompt_compiler.candidates.genome import CandidateGenome
-from prompt_compiler.operators.proposer import RewriteProposer, TokenizerAwareRewritePlanner
+from prompt_compiler.operators.proposer import (
+    RewriteAttempt,
+    RewriteProposer,
+    RewriteVariant,
+    TokenizerAwareRewritePlanner,
+    make_rewrite_attempts,
+)
 from prompt_compiler.operators.rewrite_ops import RewriteOperator
 from prompt_compiler.prompt.assembly import assemble_candidate
 from prompt_compiler.prompt.chunk import PLACEHOLDER_RE, PromptChunk
@@ -41,6 +48,20 @@ MULTILINGUAL_OPERATORS = {
 }
 
 
+@dataclass
+class ChunkProposalPool:
+    chunker_name: str
+    chunks: tuple[PromptChunk, ...]
+    variants_by_chunk: dict[str, list[RewriteVariant]] = field(default_factory=dict)
+    attempted: set[tuple[str, str]] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class SeedPopulationResult:
+    candidates: list[Candidate]
+    proposal_pools: tuple[ChunkProposalPool, ...]
+
+
 def seed_population(
     prompt_template: str,
     tokenizer: Tokenizer,
@@ -48,76 +69,119 @@ def seed_population(
     proposer: RewriteProposer | None = None,
     chunker_names: tuple[str, ...] | None = None,
     token_window_size: int = 80,
+    proposal_attempts: int = 1,
+    proposal_jitter_seed: int = 0,
 ) -> list[Candidate]:
+    return seed_population_with_proposals(
+        prompt_template,
+        tokenizer,
+        population_size,
+        proposer=proposer,
+        chunker_names=chunker_names,
+        token_window_size=token_window_size,
+        proposal_attempts=proposal_attempts,
+        proposal_jitter_seed=proposal_jitter_seed,
+    ).candidates
+
+
+def seed_population_with_proposals(
+    prompt_template: str,
+    tokenizer: Tokenizer,
+    population_size: int,
+    proposer: RewriteProposer | None = None,
+    chunker_names: tuple[str, ...] | None = None,
+    token_window_size: int = 80,
+    proposal_attempts: int = 1,
+    proposal_jitter_seed: int = 0,
+) -> SeedPopulationResult:
     planner = TokenizerAwareRewritePlanner(tokenizer, proposer=proposer)
     population: list[Candidate] = []
     seen_prompts: set[str] = set()
     chunkings = _selected_chunkings(prompt_template, tokenizer, chunker_names, token_window_size=token_window_size)
+    attempts = make_rewrite_attempts(proposal_attempts, seed=proposal_jitter_seed)
+    pools = [ChunkProposalPool(chunker_name=name, chunks=tuple(chunks)) for name, chunks in chunkings]
 
-    for chunker_name, chunks in chunkings:
+    for pool in pools:
         _append_candidate_if_valid(
             population,
             seen_prompts,
-            lambda chunker_name=chunker_name, chunks=chunks: _candidate_from_uniform_operator(
-                chunker_name,
-                chunks,
+            lambda pool=pool: _candidate_from_uniform_operator_pool(
+                pool,
                 RewriteOperator.KEEP,
                 tokenizer,
                 planner,
+                attempts,
             ),
         )
         if len(population) >= population_size:
-            return population
+            return SeedPopulationResult(population, tuple(pools))
 
     for operator in BROAD_OPERATORS[1:]:
-        added_for_operator = False
-        for chunker_name, chunks in chunkings:
-            added_for_operator = _append_candidate_if_valid(
-                population,
-                seen_prompts,
-                lambda chunker_name=chunker_name, chunks=chunks, operator=operator: _candidate_from_uniform_operator(
-                    chunker_name,
-                    chunks,
-                    operator,
-                    tokenizer,
-                    planner,
-                ),
-            ) or added_for_operator
-            if added_for_operator:
-                break
-        if len(population) >= population_size:
-            return population
-
-    for operator in BROAD_OPERATORS[1:]:
-        for chunker_name, chunks in chunkings:
+        for pool in pools:
             _append_candidate_if_valid(
                 population,
                 seen_prompts,
-                lambda chunker_name=chunker_name, chunks=chunks, operator=operator: _candidate_from_uniform_operator(
-                    chunker_name,
-                    chunks,
+                lambda pool=pool, operator=operator: _candidate_from_uniform_operator_pool(
+                    pool,
                     operator,
                     tokenizer,
                     planner,
+                    attempts,
                 ),
             )
             if len(population) >= population_size:
-                return population
+                return SeedPopulationResult(population, tuple(pools))
+        if len(population) >= population_size:
+            return SeedPopulationResult(population, tuple(pools))
 
-    for chunker_name, chunks in chunkings:
+    for operator in BROAD_OPERATORS[1:]:
+        for pool in pools:
+            _append_candidate_if_valid(
+                population,
+                seen_prompts,
+                lambda pool=pool, operator=operator: _candidate_from_uniform_operator_pool(
+                    pool,
+                    operator,
+                    tokenizer,
+                    planner,
+                    attempts,
+                ),
+            )
+            if len(population) >= population_size:
+                return SeedPopulationResult(population, tuple(pools))
+
+    for variant_rank in range(1, max(1, proposal_attempts)):
+        for operator in BROAD_OPERATORS[1:]:
+            for pool in pools:
+                _append_candidate_if_valid(
+                    population,
+                    seen_prompts,
+                    lambda pool=pool, operator=operator, variant_rank=variant_rank: _candidate_from_uniform_operator_pool(
+                        pool,
+                        operator,
+                        tokenizer,
+                        planner,
+                        attempts,
+                        variant_rank=variant_rank,
+                    ),
+                )
+                if len(population) >= population_size:
+                    return SeedPopulationResult(population, tuple(pools))
+
+    for pool in pools:
         _append_candidate_if_valid(
             population,
             seen_prompts,
-            lambda chunker_name=chunker_name, chunks=chunks: _candidate_from_min_tokens(
-                chunker_name,
-                chunks,
+            lambda pool=pool: _candidate_from_min_tokens_pool(
+                pool,
                 tokenizer,
                 planner,
+                attempts,
             ),
         )
         if len(population) >= population_size:
-            return population
-    return population[:population_size]
+            return SeedPopulationResult(population, tuple(pools))
+    return SeedPopulationResult(population[:population_size], tuple(pools))
 
 
 def next_generation_from_frontier(
@@ -129,8 +193,11 @@ def next_generation_from_frontier(
     chunker_names: tuple[str, ...] | None = None,
     frontier_order: tuple[str, ...] | None = None,
     elite_ids: tuple[str, ...] = (),
+    proposal_attempts: int = 1,
+    proposal_jitter_seed: int = 0,
 ) -> list[Candidate]:
     planner = TokenizerAwareRewritePlanner(tokenizer, proposer=proposer)
+    attempts = make_rewrite_attempts(proposal_attempts, seed=proposal_jitter_seed)
     parents = _ordered_frontier_parents(population, frontier_ids, frontier_order) or population[:1]
     children: list[Candidate] = []
     seen_prompts: set[str] = set()
@@ -149,7 +216,7 @@ def next_generation_from_frontier(
             if len(children) >= population_size:
                 return children[:population_size]
 
-    mutation_streams = [_candidate_mutations(parent, tokenizer, planner) for parent in parents]
+    mutation_streams = [_candidate_mutations(parent, tokenizer, planner, attempts) for parent in parents]
     while mutation_streams and len(children) < population_size:
         active_streams = []
         for stream in mutation_streams:
@@ -183,6 +250,7 @@ def _candidate_mutations(
     parent: Candidate,
     tokenizer: Tokenizer,
     planner: TokenizerAwareRewritePlanner,
+    attempts: tuple[RewriteAttempt, ...],
 ) -> Iterator[Candidate]:
     for chunk_index, chunk in enumerate(parent.chunks):
         if chunk.protected:
@@ -195,7 +263,7 @@ def _candidate_mutations(
             end_char=len(chunk.original_text),
             protected=chunk.protected,
         )
-        for variant in planner.plan(prompt_chunk, BROAD_OPERATORS):
+        for variant in planner.plan(prompt_chunk, BROAD_OPERATORS, attempts=attempts):
             if variant.operator == chunk.operator:
                 continue
             new_chunks = list(parent.chunks)
@@ -283,6 +351,30 @@ def _candidate_from_uniform_operator(
     return _build_candidate(chunker_name, operator_map, compressed)
 
 
+def _candidate_from_uniform_operator_pool(
+    pool: ChunkProposalPool,
+    operator: RewriteOperator,
+    tokenizer: Tokenizer,
+    planner: TokenizerAwareRewritePlanner,
+    attempts: tuple[RewriteAttempt, ...],
+    *,
+    variant_rank: int = 0,
+) -> Candidate:
+    compressed: list[CompressedChunk] = []
+    operator_map: dict[str, RewriteOperator] = {}
+    for chunk in pool.chunks:
+        effective_operator = RewriteOperator.KEEP if chunk.protected else operator
+        variants = _variants_for(pool, chunk, effective_operator, planner, attempts)
+        if not variants:
+            variants = _variants_for(pool, chunk, RewriteOperator.KEEP, planner, attempts)
+        if not variants:
+            raise CandidateBuildError(f"no valid rewrite for {chunk.id}/{effective_operator.value}")
+        variant = variants[min(variant_rank, len(variants) - 1)]
+        operator_map[chunk.id] = variant.operator
+        compressed.append(_compressed_chunk(chunk, variant.operator, variant.text, variant.token_count, variant.gloss, tokenizer))
+    return _build_candidate(pool.chunker_name, operator_map, compressed)
+
+
 def _candidate_from_min_tokens(
     chunker_name: str,
     chunks: list[PromptChunk],
@@ -301,6 +393,61 @@ def _candidate_from_min_tokens(
         operator_map[chunk.id] = variant.operator
         compressed.append(_compressed_chunk(chunk, variant.operator, variant.text, variant.token_count, variant.gloss, tokenizer))
     return _build_candidate(chunker_name, operator_map, compressed)
+
+
+def _candidate_from_min_tokens_pool(
+    pool: ChunkProposalPool,
+    tokenizer: Tokenizer,
+    planner: TokenizerAwareRewritePlanner,
+    attempts: tuple[RewriteAttempt, ...],
+) -> Candidate:
+    compressed: list[CompressedChunk] = []
+    operator_map: dict[str, RewriteOperator] = {}
+    for chunk in pool.chunks:
+        variants: list[RewriteVariant] = []
+        for operator in BROAD_OPERATORS:
+            variants.extend(_variants_for(pool, chunk, RewriteOperator.KEEP if chunk.protected else operator, planner, attempts))
+        variants = [variant for variant in variants if variant.text.strip() or chunk.protected]
+        if chunk.protected:
+            variants = [variant for variant in variants if variant.text == chunk.text]
+        if not variants:
+            raise CandidateBuildError(f"no valid rewrite for {chunk.id}")
+        variant = sorted(variants, key=lambda item: (item.token_count, item.operator.value, item.attempt_id))[0]
+        operator_map[chunk.id] = variant.operator
+        compressed.append(_compressed_chunk(chunk, variant.operator, variant.text, variant.token_count, variant.gloss, tokenizer))
+    return _build_candidate(pool.chunker_name, operator_map, compressed)
+
+
+def _variants_for(
+    pool: ChunkProposalPool,
+    chunk: PromptChunk,
+    operator: RewriteOperator,
+    planner: TokenizerAwareRewritePlanner,
+    attempts: tuple[RewriteAttempt, ...],
+) -> list[RewriteVariant]:
+    attempted_key = (chunk.id, operator.value)
+    if attempted_key not in pool.attempted:
+        existing = {
+            _variant_dedupe_key(variant)
+            for variant in pool.variants_by_chunk.get(chunk.id, [])
+        }
+        new_variants = planner.plan(chunk, (operator,), attempts=attempts)
+        for variant in new_variants:
+            key = _variant_dedupe_key(variant)
+            if key in existing:
+                continue
+            existing.add(key)
+            pool.variants_by_chunk.setdefault(chunk.id, []).append(variant)
+        pool.attempted.add(attempted_key)
+    return [
+        variant
+        for variant in pool.variants_by_chunk.get(chunk.id, [])
+        if variant.operator == operator
+    ]
+
+
+def _variant_dedupe_key(variant: RewriteVariant) -> str:
+    return " ".join(variant.text.split())
 
 
 def _compressed_chunk(

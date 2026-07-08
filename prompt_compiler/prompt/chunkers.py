@@ -127,6 +127,43 @@ def _split_placeholder_chunks(chunks: list[PromptChunk]) -> list[PromptChunk]:
     return split
 
 
+def _append_obligation_line(chunks: list[PromptChunk], prefix: str, text: str, start: int) -> None:
+    splitters = (" and preserve ",)
+    lowered = text.lower()
+    for splitter in splitters:
+        split_at = lowered.find(splitter)
+        if split_at <= 0:
+            continue
+        first = text[:split_at].strip()
+        second_start = split_at + len(" and ")
+        second = text[second_start:].strip()
+        if first:
+            chunks.append(_make_chunk(prefix, len(chunks), first, start, start + split_at))
+        if second:
+            chunks.append(
+                _make_chunk(
+                    prefix,
+                    len(chunks),
+                    second,
+                    start + second_start,
+                    start + second_start + len(second),
+                )
+            )
+        return
+
+    sentence_spans = list(re.finditer(r"[^.!?]+[.!?]?", text))
+    if len([span for span in sentence_spans if span.group(0).strip()]) <= 1:
+        chunks.append(_make_chunk(prefix, len(chunks), text, start, start + len(text)))
+        return
+
+    for span in sentence_spans:
+        sentence = span.group(0).strip()
+        if not sentence:
+            continue
+        sentence_start = start + span.start() + span.group(0).find(sentence)
+        chunks.append(_make_chunk(prefix, len(chunks), sentence, sentence_start, sentence_start + len(sentence)))
+
+
 @dataclass
 class ParagraphChunker:
     name: str = "paragraph"
@@ -241,6 +278,24 @@ class InstructionRoleChunker:
 
 
 @dataclass
+class ObligationChunker:
+    name: str = "obligation"
+
+    def chunk(self, prompt: str) -> list[PromptChunk]:
+        chunks: list[PromptChunk] = []
+        cursor = 0
+        for line in prompt.splitlines(keepends=True):
+            line_start = cursor
+            cursor += len(line)
+            stripped = line.strip()
+            if not stripped:
+                continue
+            content_start = line_start + line.find(stripped)
+            _append_obligation_line(chunks, self.name, stripped, content_start)
+        return chunks
+
+
+@dataclass
 class TokenWindowChunker:
     max_tokens: int = 80
     tokenizer: Tokenizer | None = None
@@ -280,6 +335,7 @@ def generate_chunkings(
     chunkers: list[Chunker] = [
         ParagraphChunker(),
         SentenceChunker(),
+        ObligationChunker(),
         MarkdownHeadingChunker(),
         SchemaAwareChunker(),
         InstructionRoleChunker(),
