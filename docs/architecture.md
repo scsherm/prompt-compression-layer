@@ -1,6 +1,32 @@
-# Architecture
+# Lingua Symbolic Prompt Compiler Architecture
 
-The compiler is a black-box learning loop over complete prompt templates.
+Lingua Symbolic Prompt Compiler searches for shorter prompt templates that preserve the behavior of a frozen target model configuration.
+
+```text
+input:
+  target model M
+  original prompt template P
+  input examples X
+
+output:
+  compressed prompt template P'
+  Pareto frontier of candidate reports
+  evaluation and trace artifacts
+```
+
+Reference outputs are behavioral references:
+
+```text
+y_i = M(P, x_i)
+```
+
+Candidate outputs are evaluated against those references:
+
+```text
+yhat_i = M(P', x_i)
+```
+
+The active optimizer uses feedback-conditioned search over complete prompt templates.
 
 ```mermaid
 flowchart LR

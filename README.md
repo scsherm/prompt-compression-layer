@@ -1,25 +1,45 @@
 # Lingua Symbolic Prompt Compiler
 
-This project learns shorter reusable instruction prompts from the behavior of a target model.
+Lingua Symbolic Prompt Compiler searches for shorter prompt templates that preserve the behavior of a frozen target model configuration.
 
-Given an original prompt `P`, target model `M`, and completion inputs `x_i`, it first records behavioral references:
+```text
+input:
+  target model M
+  original prompt template P
+  input examples X
+
+output:
+  compressed prompt template P'
+  Pareto frontier of candidate reports
+  evaluation and trace artifacts
+```
+
+Dataset rows may also provide expected structured outputs for task-specific evaluation.
+
+Reference outputs are behavioral references:
 
 ```text
 y_i = M(P, x_i)
 ```
 
-It then searches for complete compressed prompts `P'` that save instruction tokens while keeping the resulting completions close to those references:
+Candidate outputs are evaluated against those references:
+
+```text
+yhat_i = M(P', x_i)
+```
+
+The optimization objective is:
 
 ```text
 maximize instruction-token savings
-minimize behavior loss between M(P', x_i) and y_i
+minimize behavior loss between yhat_i and y_i
 ```
 
 The original prompt defines the reference behavior for the search.
 
 ## Optimization loop
 
-The active optimizer is a feedback-conditioned, full-prompt black-box search:
+The active optimizer is a feedback-conditioned search over complete prompt templates:
 
 1. Run the original prompt on every input to create the reference completions.
 2. Ask the proposer model for a diverse batch of complete, shorter prompt templates.
