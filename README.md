@@ -93,8 +93,6 @@ or:
 python3 -m pip install -r requirements.txt
 ```
 
-The CLI loads `OPENAI_API_KEY` from the environment or `.env.local`.
-
 ## Run
 
 ```bash
