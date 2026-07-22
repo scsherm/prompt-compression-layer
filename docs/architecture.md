@@ -22,7 +22,7 @@ flowchart LR
 
 ## Search state
 
-The original prompt has one role: produce the behavioral reference completions. It is not a candidate or a fallback action.
+The original prompt produces the behavioral reference completions used throughout the search.
 
 Every trial stores:
 
@@ -46,26 +46,24 @@ The proposer receives the original prompt plus empirical search feedback:
 - worst completion residuals;
 - round-by-round frontier improvement.
 
-It returns complete prompts rather than chunk rewrites or edit operations. Local code only verifies that proposals are shorter and preserve the placeholder sequence.
+The proposer returns complete prompts. Candidate eligibility requires a shorter instruction-token count and preservation of the template placeholder sequence.
 
 ## Reward and uncertainty
 
-Candidate completions are compared with the original-prompt completions on the same inputs. When labeled expected JSON is present, the primary signal is regression in ground-truth precision, recall, and F1. Without labels, semantic distance is the primary behavior signal. Format and task-field failures are soft loss rather than gates.
+Candidate completions are compared with the original-prompt completions on the same inputs. When labeled expected JSON is present, the primary signal is the change in ground-truth precision, recall, and F1. For unlabeled examples, semantic distance is the primary behavior signal. Format and task-field failures contribute to behavior loss.
 
-Repeated original-prompt completions estimate the target model's natural task or output variation. This estimate serves two purposes:
+Repeated original-prompt completions estimate the target model's natural task or output variation. The estimate supports:
 
-1. remove expected natural distance from candidate semantic loss;
-2. identify close or uncertain frontier candidates that deserve another rollout.
+1. natural-distance correction in candidate semantic loss;
+2. additional rollouts for close or uncertain frontier candidates.
 
-Candidates far from the frontier are not repeatedly sampled.
-
-The active OpenAI adapter does not impose a request timeout or output-token ceiling. Experiment budgets such as rounds, proposal batch size, dataset split, and maximum repeat count remain explicit controls because they determine evaluation cost rather than candidate validity.
+Additional sampling is concentrated on candidates near the estimated frontier.
 
 ## Convergence and selection
 
 Search progress is the normalized hypervolume dominated by the token-savings/behavior-quality frontier. The loop stops after a configured number of rounds without material hypervolume improvement.
 
-Search-frontier prompts are evaluated on dev examples. The dev Pareto frontier is then evaluated on holdout examples. The complete frontier is the primary result. For convenience, one prompt is recommended using an explicit, configurable behavior-loss penalty rather than a hidden validation hierarchy.
+Search-frontier prompts are evaluated on dev examples. The dev Pareto frontier is then evaluated on holdout examples. The complete frontier is the primary result, with one prompt recommended using a configurable behavior-loss penalty.
 
 ## Components
 
@@ -75,5 +73,3 @@ Search-frontier prompts are evaluated on dev examples. The dev Pareto frontier i
 - `optimize/feedback_optimizer.py`: end-to-end learning loop.
 - `eval/evaluator.py`: target completions and behavior comparisons.
 - `reports/writer.py`: reproducible run artifacts.
-
-The historical chunk/operator path is retained only behind `optimize_prompt_legacy` for ablation. It is not on the CLI or default import path.

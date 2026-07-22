@@ -15,7 +15,7 @@ maximize instruction-token savings
 minimize behavior loss between M(P', x_i) and y_i
 ```
 
-The original prompt is reference data. It is never inserted into the candidate pool.
+The original prompt defines the reference behavior for the search.
 
 ## Optimization loop
 
@@ -31,13 +31,13 @@ The active optimizer is a feedback-conditioned, full-prompt black-box search:
 8. Stop when the Pareto frontier no longer materially improves, or when the round budget is reached.
 9. Re-evaluate frontier candidates on dev and holdout examples.
 
-The proposer chooses the rewrite scope itself. A proposal can reorganize the whole prompt, merge distant redundancy, replace a section, or make a small repair. There is no active chunk/operator menu and no unchanged-prompt candidate.
+The proposer chooses the rewrite scope itself. A proposal can reorganize the whole prompt, merge distant redundancy, replace a section, or make a small repair.
 
 ## Behavior reward
 
-Behavior preservation is learned from observed completions, not from a prose-only validation rule.
+Candidate quality is learned from observed target-model completions.
 
-When a dataset row contains a labeled JSON `expected` value, the optimizer measures field/value true positives, false positives, false negatives, precision, recall, F1, exact match, JSON validity, and schema validity. Candidate reward is based on regression from the original prompt's labeled task quality. This supports extraction tasks such as malicious-IP identification without hard-coding SOC-specific fields.
+When a dataset row contains a labeled JSON `expected` value, the optimizer measures field/value true positives, false positives, false negatives, precision, recall, F1, exact match, JSON validity, and schema validity. Candidate reward measures the change in labeled task quality relative to the original prompt. The same field/value comparison supports extraction tasks such as malicious-IP identification and other structured-output contracts.
 
 When no task label is available, the soft behavior loss is:
 
@@ -49,7 +49,7 @@ residual semantic distance
 
 Natural target-model variation is estimated by repeating the original prompt. For labeled tasks this measures task-quality variation; otherwise it measures semantic-output variation. The observed variance is used to decide which close candidates need another rollout.
 
-Format and task checks contribute to reward; they do not act as lexicographic hard gates. The only candidate eligibility constraints are structural necessities:
+Format and task checks contribute continuously to behavior loss. Candidate templates are eligible when:
 
 - it must use fewer instruction tokens than the original;
 - it must preserve the template placeholder sequence, such as `{{input}}`.
@@ -58,7 +58,7 @@ Format and task checks contribute to reward; they do not act as lexicographic ha
 
 - The target model produces both the original reference completions and candidate completions.
 - The proposer model uses measured search history to propose the next full-prompt batch.
-- The configured tokenizer supplies actual instruction-token counts. Model-estimated counts are ignored.
+- The configured tokenizer supplies instruction-token counts.
 
 ## Setup
 
@@ -121,11 +121,9 @@ Useful controls:
 - `--no-feedback`: withhold candidate outcomes from later rounds for an ablation.
 - `--selection-behavior-penalty`: explicit behavior-loss penalty used only to recommend one point from the final Pareto frontier.
 
-OpenAI calls have no client request timeout and no output-token ceiling by default. `--max-output-tokens` and `--proposer-max-output-tokens` are opt-in experiment controls.
+The default `auto` evaluation profile uses labeled precision/recall/F1 when `expected` JSON is present and normalized sentence-transformer embeddings for unlabeled tasks. Lexical distance is available for offline evaluation.
 
-The default `auto` evaluation profile uses labeled precision/recall/F1 when `expected` JSON is present. For unlabeled tasks it uses normalized sentence-transformer embeddings; lexical distance is only an explicit offline fallback.
-
-The default `auto` tokenizer uses the target model's tokenizer for OpenAI runs and the approximate tokenizer only for local mock runs.
+The default `auto` tokenizer uses the target model's tokenizer for OpenAI runs and the approximate tokenizer for local mock runs.
 
 ## Budget-matched feedback ablation
 
@@ -140,8 +138,6 @@ python3 -m prompt_compiler.cli ... --output-dir runs/no_feedback --no-feedback
 ```
 
 Use a convergence patience greater than the round count when the experiment must consume exactly the same round budget. Compare `search_archive.json`, `compression_report.json`, and `pareto_frontier.csv`.
-
-The former chunk/operator optimizer remains exposed as `optimize_prompt_legacy` only for historical budget-matched comparisons; it is not used by the CLI or the default package API.
 
 ## Artifacts
 
