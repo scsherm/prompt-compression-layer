@@ -37,6 +37,7 @@ class ReferenceExample:
     prompt_tokens: int
     output_tokens: int
     usage: dict[str, int] | None = None
+    metadata: dict | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -86,6 +87,7 @@ def build_reference_dataset(
                 prompt_tokens=tokenizer.count(rendered),
                 output_tokens=tokenizer.count(response.text),
                 usage=response.usage,
+                metadata=example.metadata,
             )
         )
     return references

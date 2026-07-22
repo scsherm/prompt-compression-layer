@@ -8,8 +8,33 @@ from prompt_compiler.eval.embedding_distance import EmbeddingDriftScorer, euclid
 from prompt_compiler.eval.evaluator import Evaluator
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.optimize.optimizer import optimize_prompt
+from prompt_compiler.operators.full_prompt_proposer import PromptProposal
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.tokenizer import ApproxTokenizer
+
+
+class FeedbackTestProposer:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+        self.contexts = []
+
+    def propose(self, context, *, batch_size):
+        self.contexts.append(context)
+        prompts = (
+            ("Triage alert. Return JSON status OPEN or CLOSED.\nInput: {{input}}",),
+            ("JSON status OPEN|CLOSED for: {{input}}",),
+        )[min(context.round_index, 1)]
+        parent_ids = tuple(item.candidate_id for item in context.frontier)
+        return tuple(
+            PromptProposal(
+                prompt_template=prompt,
+                instruction_tokens=self.tokenizer.count(PromptTemplate(prompt).instruction_text()),
+                token_savings=0,
+                rationale="compress while preserving measured mock behavior",
+                based_on_candidate_ids=parent_ids,
+            )
+            for prompt in prompts[:batch_size]
+        )
 
 
 class EvaluatorAndOptimizerTests(unittest.TestCase):
@@ -53,24 +78,50 @@ class EvaluatorAndOptimizerTests(unittest.TestCase):
         ]
 
         with tempfile.TemporaryDirectory() as tmp:
+            tokenizer = ApproxTokenizer()
+            proposer = FeedbackTestProposer(tokenizer)
             result = optimize_prompt(
                 target_model=RuleBasedMockModel(),
+                prompt_proposer=proposer,
                 original_prompt=prompt,
                 inputs=inputs,
                 output_dir=Path(tmp),
-                epochs=2,
-                population_size=10,
-                tokenizer=ApproxTokenizer(),
+                rounds=2,
+                batch_size=1,
+                tokenizer=tokenizer,
                 output_contract=OutputContract(require_json=True, required_fields=("status",)),
+                baseline_repeats=0,
+                max_candidate_rollouts=1,
+                log_to_stderr=False,
             )
 
             self.assertIn("{{input}}", result.best_prompt_template)
             self.assertTrue(result.pareto_frontier)
+            self.assertEqual(len(proposer.contexts), 2)
+            self.assertTrue(proposer.contexts[1].frontier)
+            feedback = proposer.contexts[1].frontier[0]
+            self.assertEqual(
+                feedback.instruction_tokens,
+                tokenizer.count(PromptTemplate(feedback.prompt_template).instruction_text()),
+            )
+            self.assertEqual(feedback.behavior_loss, 0.0)
+            self.assertTrue(feedback.diff_from_original)
+            self.assertTrue(feedback.worst_residuals)
+            self.assertTrue(feedback.worst_residuals[0].reference_completion)
+            self.assertTrue(feedback.worst_residuals[0].candidate_completion)
+            self.assertNotIn(prompt.text, [trial.prompt for trial in result.search_archive.trials])
+            self.assertTrue(
+                all(
+                    trial.instruction_tokens < result.evaluation_report.original_instruction_tokens
+                    for trial in result.search_archive.trials
+                )
+            )
             self.assertTrue((Path(tmp) / "best_prompt.txt").exists())
             self.assertTrue((Path(tmp) / "compression_report.json").exists())
             self.assertTrue((Path(tmp) / "reference_dataset.jsonl").exists())
             self.assertTrue((Path(tmp) / "candidate_reports.jsonl").exists())
             self.assertTrue((Path(tmp) / "candidate_outputs.jsonl").exists())
+            self.assertTrue((Path(tmp) / "search_archive.json").exists())
 
 
 if __name__ == "__main__":

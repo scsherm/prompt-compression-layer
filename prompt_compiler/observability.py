@@ -50,6 +50,21 @@ def _human_line(row: dict[str, Any]) -> str:
             f"tok_red={row.get('token_reduction')} "
             f"cost=${row.get('estimated_cost_usd')} elapsed={row.get('elapsed_seconds')}s"
         )
+    if event == "proposal_round_start":
+        return (
+            f"[round {row.get('round')}] proposing {row.get('batch_size')} complete prompts; "
+            f"frontier={row.get('frontier_count')} trials={row.get('trial_count')}"
+        )
+    if event == "proposal_batch_generated":
+        return f"[round {row.get('round')}] generated {row.get('candidate_count')} compressed prompts"
+    if event == "search_round_complete":
+        return (
+            f"[round {row.get('round')}] frontier={row.get('frontier_count')} "
+            f"best_reduction={row.get('best_token_reduction')} "
+            f"best_behavior_loss={row.get('best_behavior_loss')}"
+        )
+    if event == "search_converged":
+        return f"[search] converged after round {row.get('round')}: {row.get('reason')}"
     if event == "epoch_start":
         return f"[epoch {row.get('epoch')}] evaluating {row.get('candidate_count')} candidates on {row.get('example_count')} examples"
     if event == "epoch_frontier":

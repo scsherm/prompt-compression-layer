@@ -13,7 +13,6 @@ class OpenAIResponsesModel:
     base_url: str | None = None
     organization: str | None = None
     project: str | None = None
-    timeout: float = 120.0
     max_retries: int = 2
     send_sampling_params: bool = False
     _client: Any = field(init=False, repr=False)
@@ -25,7 +24,7 @@ class OpenAIResponsesModel:
             raise RuntimeError("Install the OpenAI adapter with `pip install openai`.") from exc
 
         kwargs: dict[str, Any] = {
-            "timeout": self.timeout,
+            "timeout": None,
             "max_retries": self.max_retries,
         }
         if self.api_key:
@@ -43,7 +42,7 @@ class OpenAIResponsesModel:
             "name": self.name,
             "provider": "openai",
             "endpoint": "responses",
-            "timeout": self.timeout,
+            "timeout": None,
             "max_retries": self.max_retries,
             "send_sampling_params": self.send_sampling_params,
         }

@@ -3,21 +3,26 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from statistics import mean
-from typing import Iterable
+from typing import Iterable, Protocol
 
-from prompt_compiler.candidates.candidate import Candidate
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DriftScorer, LexicalDriftScorer, normalize_distance
+from prompt_compiler.eval.extraction_metrics import ExtractionMetrics, aggregate_extraction, score_extraction
 from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.prompt.template import PromptTemplate
 from prompt_compiler.tokenizer import Tokenizer
+
+
+class EvaluatedPrompt(Protocol):
+    id: str
+    prompt_template: str
 
 
 @dataclass(frozen=True)
 class EvaluationWeights:
     token: float = 0.50
     embedding: float = 0.50
-    semantic_drift_normalization: float = 1.0
+    semantic_drift_normalization: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +58,9 @@ class CandidateOutputRecord:
     model: str
     usage: dict[str, int] | None = None
     metadata: dict | None = None
+    reference_extraction: dict | None = None
+    candidate_extraction: dict | None = None
+    task_regression_loss: float | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +80,10 @@ class CandidateReport:
     output_records: list[CandidateOutputRecord] = field(default_factory=list)
     avg_normalized_semantic_drift: float = 0.0
     normalized_token_reduction: float = 0.0
+    reference_extraction: dict | None = None
+    candidate_extraction: dict | None = None
+    extraction_f1_delta: float | None = None
+    task_regression_loss: float | None = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -136,7 +148,7 @@ class Evaluator:
     def evaluate_candidate(
         self,
         *,
-        candidate: Candidate,
+        candidate: EvaluatedPrompt,
         model: ModelClient,
         references: Iterable,
         original_instruction_tokens: int,
@@ -145,6 +157,8 @@ class Evaluator:
         prompt = PromptTemplate(candidate.prompt_template)
         comparisons: list[OutputComparison] = []
         output_records: list[CandidateOutputRecord] = []
+        reference_extraction_metrics: list[ExtractionMetrics] = []
+        candidate_extraction_metrics: list[ExtractionMetrics] = []
         usage_summary: dict[str, int] = {}
         for reference in references:
             rendered = prompt.render({"input": reference.input_text})
@@ -152,6 +166,18 @@ class Evaluator:
             _add_usage(usage_summary, response.usage)
             comparison = self.compare_outputs(response.text, reference.reference_output, reference.id)
             comparisons.append(comparison)
+            expected = (reference.metadata or {}).get("expected")
+            reference_extraction = None
+            candidate_extraction = None
+            task_regression_loss = None
+            if isinstance(expected, dict):
+                reference_metric = score_extraction(reference.reference_output, expected)
+                candidate_metric = score_extraction(response.text, expected)
+                reference_extraction_metrics.append(reference_metric)
+                candidate_extraction_metrics.append(candidate_metric)
+                reference_extraction = reference_metric.to_dict()
+                candidate_extraction = candidate_metric.to_dict()
+                task_regression_loss = max(reference_metric.f1 - candidate_metric.f1, 0.0)
             output_records.append(
                 CandidateOutputRecord(
                     candidate_id=candidate.id,
@@ -165,6 +191,9 @@ class Evaluator:
                     model=response.model,
                     usage=response.usage,
                     metadata=response.metadata,
+                    reference_extraction=reference_extraction,
+                    candidate_extraction=candidate_extraction,
+                    task_regression_loss=task_regression_loss,
                 )
             )
 
@@ -174,7 +203,7 @@ class Evaluator:
         failures = [failure for comparison in comparisons for failure in comparison.failures]
         count = max(len(comparisons), 1)
         operator_summary: dict[str, int] = {}
-        for chunk in candidate.chunks:
+        for chunk in getattr(candidate, "chunks", ()):
             key = f"{chunk.chunk_type.value}:{chunk.operator.value}"
             operator_summary[key] = operator_summary.get(key, 0) + 1
 
@@ -187,6 +216,13 @@ class Evaluator:
             normalized_semantic_drift=avg_normalized_drift,
             weights=self.weights,
         )
+        reference_extraction = aggregate_extraction(reference_extraction_metrics)
+        candidate_extraction = aggregate_extraction(candidate_extraction_metrics)
+        extraction_f1_delta = None
+        task_regression_loss = None
+        if reference_extraction is not None and candidate_extraction is not None:
+            extraction_f1_delta = float(candidate_extraction["f1"]) - float(reference_extraction["f1"])
+            task_regression_loss = max(-extraction_f1_delta, 0.0)
 
         return CandidateReport(
             candidate_id=candidate.id,
@@ -204,6 +240,10 @@ class Evaluator:
             usage_summary=usage_summary,
             output_records=output_records,
             avg_normalized_semantic_drift=avg_normalized_drift,
+            reference_extraction=reference_extraction,
+            candidate_extraction=candidate_extraction,
+            extraction_f1_delta=extraction_f1_delta,
+            task_regression_loss=task_regression_loss,
         )
 
 

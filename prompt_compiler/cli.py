@@ -5,136 +5,128 @@ import json
 import os
 from pathlib import Path
 
-from prompt_compiler.candidates.generation import describe_chunkings, seed_population
 from prompt_compiler.env import load_env_file
 from prompt_compiler.eval.contract_checks import OutputContract
 from prompt_compiler.eval.embedding_distance import DEFAULT_EMBEDDING_MODEL, make_drift_scorer
 from prompt_compiler.eval.evaluator import EvaluationWeights
+from prompt_compiler.models.base import GenerateParams, ModelClient
 from prompt_compiler.models.mock import RuleBasedMockModel
 from prompt_compiler.models.openai_client import OpenAIResponsesModel
-from prompt_compiler.models.base import GenerateParams, ModelClient
-from prompt_compiler.optimize.optimizer import optimize_prompt
-from prompt_compiler.operators.proposer import LLMRewriteProposer, RewriteProposer
+from prompt_compiler.operators.full_prompt_proposer import (
+    LLMFullPromptProposer,
+    ProposalContext,
+)
+from prompt_compiler.optimize.feedback_optimizer import optimize_prompt
 from prompt_compiler.prompt.template import PromptTemplate
-from prompt_compiler.reports.candidate_preview import write_candidate_template_preview
 from prompt_compiler.tokenizer import make_tokenizer
 
 
-DEFAULT_CHUNKERS = "paragraph,sentence,markdown,schema_aware"
 DEFAULT_OPENAI_PROPOSER_MODEL = "gpt-5.4-mini-2026-03-17"
 DEFAULT_OPENAI_PROPOSER_REASONING_EFFORT = "medium"
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Behavioral prompt compression compiler")
-    parser.add_argument("--model", default="mock", help="Model id. Use 'mock' or an OpenAI model id.")
+    parser = argparse.ArgumentParser(
+        description="Feedback-conditioned behavioral prompt compression"
+    )
+    parser.add_argument("--model", default="mock", help="Target model id, or 'mock'.")
     parser.add_argument("--provider", default="auto", choices=("auto", "mock", "openai"))
-    parser.add_argument("--proposer", default="auto", choices=("auto", "rule", "openai"))
+    parser.add_argument("--proposer-model", default=DEFAULT_OPENAI_PROPOSER_MODEL)
+    parser.add_argument("--proposer-max-output-tokens", type=int, default=None)
     parser.add_argument(
-        "--proposer-model",
-        default=None,
-        help=f"Model used to propose prompt variations. Defaults to {DEFAULT_OPENAI_PROPOSER_MODEL} for OpenAI proposers.",
+        "--proposer-reasoning-effort",
+        default=DEFAULT_OPENAI_PROPOSER_REASONING_EFFORT,
     )
-    parser.add_argument("--proposer-max-output-tokens", type=int, default=16384)
-    parser.add_argument("--proposer-reasoning-effort", default=DEFAULT_OPENAI_PROPOSER_REASONING_EFFORT)
-    parser.add_argument("--prompt", required=True, help="Path to original prompt template")
-    parser.add_argument("--inputs", required=True, help="JSONL file with {'id','input'} rows")
-    parser.add_argument("--output-dir", required=True, help="Directory for run artifacts")
+    parser.add_argument("--prompt", required=True, help="Path to the original prompt template.")
+    parser.add_argument("--inputs", required=True, help="JSONL file with {'id','input'} rows.")
+    parser.add_argument("--output-dir", required=True, help="Directory for run artifacts.")
+    parser.add_argument("--rounds", "--epochs", dest="rounds", type=int, default=8)
+    parser.add_argument("--batch-size", "--population-size", dest="batch_size", type=int, default=8)
+    parser.add_argument("--convergence-patience", type=int, default=3)
+    parser.add_argument("--min-frontier-improvement", type=float, default=1e-4)
+    parser.add_argument("--frontier-parent-limit", type=int, default=None)
+    parser.add_argument("--recent-contrast-limit", type=int, default=None)
+    parser.add_argument("--worst-example-limit", type=int, default=None)
+    parser.add_argument("--repeat-top-k", type=int, default=None)
+    parser.add_argument("--max-candidate-rollouts", type=int, default=2)
+    parser.add_argument("--repeat-close-within", type=float, default=0.02)
+    parser.add_argument("--baseline-repeats", type=int, default=2)
     parser.add_argument(
-        "--preview-candidates",
-        action="store_true",
-        help="Write reassembled candidate prompt templates and exit before target-model evaluation.",
-    )
-    parser.add_argument(
-        "--preview-min-token-reduction",
+        "--selection-behavior-penalty",
         type=float,
-        default=0.15,
-        help="Minimum estimated instruction-token reduction for candidates shown in preview mode.",
+        default=1.0,
+        help="Explicit behavior-loss penalty used only to select one prompt from the final Pareto frontier.",
     )
-    parser.add_argument("--epochs", type=int, default=3)
-    parser.add_argument("--population-size", type=int, default=32)
+    parser.add_argument(
+        "--no-feedback",
+        action="store_true",
+        help="Ablation: withhold measured candidate outcomes from later proposal rounds.",
+    )
+    parser.add_argument(
+        "--preview-proposals",
+        action="store_true",
+        help="Generate one initial full-prompt proposal batch without target-model evaluation.",
+    )
     parser.add_argument(
         "--example-limit",
         "--input-limit",
         dest="input_limit",
         type=int,
         default=None,
-        help="Use only the first N input examples/rows from the JSONL file",
-    )
-    parser.add_argument(
-        "--elitism-count",
-        type=int,
-        default=1,
-        help="Carry the best N ranked frontier candidates unchanged into the next epoch.",
     )
     parser.add_argument("--require-json", action="store_true")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--max-output-tokens", type=int, default=256)
-    parser.add_argument("--reasoning-effort", default=None, help="OpenAI reasoning effort, e.g. minimal, low, medium")
-    parser.add_argument(
-        "--send-openai-sampling-params",
-        action="store_true",
-        help="Send temperature/top_p to OpenAI Responses. GPT-5 Nano currently rejects these controls.",
-    )
+    parser.add_argument("--max-output-tokens", type=int, default=None)
+    parser.add_argument("--reasoning-effort", default=None)
+    parser.add_argument("--send-openai-sampling-params", action="store_true")
     parser.add_argument("--system-prompt", default="")
-    parser.add_argument("--env-file", default=".env.local", help="Local env file to load before adapter setup")
-    parser.add_argument("--max-concurrency", type=int, default=1, help="Maximum candidates evaluated concurrently")
-    parser.add_argument(
-        "--chunkers",
-        default=DEFAULT_CHUNKERS,
-        help=(
-            "Comma-separated chunkers to explore. Available: paragraph,sentence,markdown,"
-            "schema_aware,instruction_role,token_window"
-        ),
-    )
-    parser.add_argument(
-        "--token-window-size",
-        type=int,
-        default=80,
-        help="Max tokenizer tokens per token_window chunker chunk.",
-    )
-    parser.add_argument(
-        "--live-log-file",
-        default="runs/live_run_events.jsonl",
-        help="Stable JSONL log mirrored for live tailing. Use '' to disable.",
-    )
-    parser.add_argument("--quiet", action="store_true", help="Write run_events.jsonl without echoing progress logs")
+    parser.add_argument("--env-file", default=".env.local")
+    parser.add_argument("--max-concurrency", type=int, default=1)
+    parser.add_argument("--live-log-file", default="runs/live_run_events.jsonl")
+    parser.add_argument("--quiet", action="store_true")
     parser.add_argument(
         "--tokenizer",
-        default="approx",
-        help="Tokenizer spec: approx, tiktoken:<encoding>, or model:<model-name>",
+        default="auto",
+        help="Tokenizer spec: auto, approx, tiktoken:<encoding>, or model:<model-name>.",
     )
     parser.add_argument(
         "--embedding-provider",
-        default="lexical",
-        choices=("lexical", "sentence-transformers", "hf-inference"),
-        help="Drift scorer backend. Use hf-inference or sentence-transformers for Mixedbread embeddings.",
+        default="auto",
+        choices=("auto", "lexical", "sentence-transformers", "hf-inference"),
     )
     parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL)
-    parser.add_argument("--hf-provider", default=None, help="Optional Hugging Face Inference Provider name")
-    parser.add_argument(
-        "--semantic-drift-normalization",
-        type=float,
-        default=1.0,
-        help="Positive scalar used to normalize raw semantic drift before combining it into loss.",
-    )
+    parser.add_argument("--hf-provider", default=None)
+    parser.add_argument("--semantic-drift-normalization", type=float, default=2.0)
     args = parser.parse_args()
 
     load_env_file(Path(args.env_file))
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise SystemExit("OPENAI_API_KEY was not found in the environment or env file.")
 
     prompt = PromptTemplate(Path(args.prompt).read_text(encoding="utf-8"))
     inputs = _read_jsonl(Path(args.inputs))
     if args.input_limit is not None:
         inputs = inputs[: args.input_limit]
-    tokenizer = make_tokenizer(args.tokenizer)
-    rewrite_proposer = _build_rewrite_proposer(args, prompt, tokenizer)
-    chunker_names = _parse_csv(args.chunkers)
-    live_log_path = Path(args.live_log_file) if args.live_log_file else None
-    if args.preview_candidates:
-        summary = _preview_candidates(args, prompt, tokenizer, rewrite_proposer, chunker_names)
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
-        print(f"candidate_templates={Path(args.output_dir) / 'candidate_templates.md'}")
+    tokenizer = make_tokenizer(_tokenizer_spec(args))
+    proposer = _build_prompt_proposer(args, tokenizer)
+
+    if args.preview_proposals:
+        proposals = proposer.propose(
+            ProposalContext(
+                original_prompt=prompt.text,
+                target_model_name=args.model,
+                target_tokenizer_name=tokenizer.name,
+            ),
+            batch_size=args.batch_size,
+        )
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "initial_proposals.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for proposal in proposals:
+                handle.write(json.dumps(proposal.__dict__, ensure_ascii=False, sort_keys=True) + "\n")
+        print(json.dumps({"proposal_count": len(proposals), "path": str(path)}, indent=2))
         return 0
 
     model = _build_model(args)
@@ -147,28 +139,38 @@ def main() -> int:
     )
     result = optimize_prompt(
         target_model=model,
+        prompt_proposer=proposer,
         original_prompt=prompt,
         inputs=inputs,
         output_dir=Path(args.output_dir),
-        epochs=args.epochs,
-        population_size=args.population_size,
+        rounds=args.rounds,
+        batch_size=args.batch_size,
+        convergence_patience=args.convergence_patience,
+        min_frontier_improvement=args.min_frontier_improvement,
+        parent_limit=args.frontier_parent_limit,
+        recent_limit=args.recent_contrast_limit,
+        worst_example_limit=args.worst_example_limit,
+        repeat_top_k=args.repeat_top_k,
+        max_candidate_rollouts=args.max_candidate_rollouts,
+        repeat_close_within=args.repeat_close_within,
+        baseline_repeats=args.baseline_repeats,
+        feedback_enabled=not args.no_feedback,
+        selection_behavior_penalty=args.selection_behavior_penalty,
         tokenizer=tokenizer,
-        evaluation_weights=EvaluationWeights(semantic_drift_normalization=args.semantic_drift_normalization),
+        evaluation_weights=EvaluationWeights(
+            semantic_drift_normalization=args.semantic_drift_normalization
+        ),
         drift_scorer=make_drift_scorer(
-            args.embedding_provider,
+            _embedding_provider(args.embedding_provider, inputs),
             model_name=args.embedding_model,
             api_key=os.environ.get("HF_TOKEN"),
             hf_provider=args.hf_provider,
         ),
         output_contract=OutputContract(require_json=args.require_json),
         params=params,
-        rewrite_proposer=rewrite_proposer,
         max_concurrency=args.max_concurrency,
         log_to_stderr=not args.quiet,
-        live_log_path=live_log_path,
-        chunker_names=chunker_names,
-        token_window_size=args.token_window_size,
-        elitism_count=args.elitism_count,
+        live_log_path=Path(args.live_log_file) if args.live_log_file else None,
     )
     print(json.dumps(result.evaluation_report.to_dict(), ensure_ascii=False, indent=2))
     print(f"best_prompt={Path(args.output_dir) / 'best_prompt.txt'}")
@@ -184,13 +186,6 @@ def _read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
-def _parse_csv(value: str | None) -> tuple[str, ...] | None:
-    if value is None:
-        return None
-    items = tuple(item.strip() for item in value.split(",") if item.strip())
-    return items or None
-
-
 def _build_model(args: argparse.Namespace) -> ModelClient:
     provider = _target_provider(args)
     if provider == "mock":
@@ -198,119 +193,49 @@ def _build_model(args: argparse.Namespace) -> ModelClient:
             raise SystemExit("--provider mock only supports --model mock")
         return RuleBasedMockModel()
     if provider == "openai":
-        if not os.environ.get("OPENAI_API_KEY"):
-            raise SystemExit("OPENAI_API_KEY was not found in the environment or env file.")
-        return OpenAIResponsesModel(name=args.model, send_sampling_params=args.send_openai_sampling_params)
+        return OpenAIResponsesModel(
+            name=args.model,
+            send_sampling_params=args.send_openai_sampling_params,
+        )
     raise SystemExit(f"Unknown provider: {provider}")
 
 
-def _build_rewrite_proposer(args: argparse.Namespace, prompt: PromptTemplate, tokenizer) -> RewriteProposer | None:
-    proposer = args.proposer
-    if proposer == "auto":
-        proposer = "rule" if _target_provider(args) == "mock" else "openai"
-    if proposer == "rule":
-        return None
-    if proposer == "openai":
-        if not os.environ.get("OPENAI_API_KEY"):
-            raise SystemExit("OPENAI_API_KEY was not found in the environment or env file.")
-        proposer_model_name = args.proposer_model or DEFAULT_OPENAI_PROPOSER_MODEL
-        if not proposer_model_name:
-            raise SystemExit("--proposer-model is required when --proposer openai and target model is not OpenAI.")
-        proposer_model = OpenAIResponsesModel(
-            name=proposer_model_name,
-            send_sampling_params=args.send_openai_sampling_params,
-        )
-        return LLMRewriteProposer(
-            model=proposer_model,
-            original_prompt=prompt.text,
-            target_model_name=args.model,
-            tokenizer=tokenizer,
-            params=GenerateParams(
-                max_tokens=args.proposer_max_output_tokens,
-                reasoning_effort=args.proposer_reasoning_effort,
-            ),
-            trace_path=Path(args.output_dir) / "proposer_traces.jsonl",
-            event_log_path=Path(args.output_dir) / "run_events.jsonl",
-            event_log_paths=(Path(args.live_log_file),) if args.live_log_file else (),
-        )
-    raise SystemExit(f"Unknown proposer: {proposer}")
-
-
-def _preview_candidates(
-    args: argparse.Namespace,
-    prompt: PromptTemplate,
-    tokenizer,
-    rewrite_proposer: RewriteProposer | None,
-    chunker_names: tuple[str, ...] | None,
-) -> dict:
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "original_prompt.txt").write_text(prompt.text, encoding="utf-8")
-    chunking_plan = describe_chunkings(
-        prompt.text,
+def _build_prompt_proposer(args: argparse.Namespace, tokenizer) -> LLMFullPromptProposer:
+    model = OpenAIResponsesModel(
+        name=args.proposer_model,
+        send_sampling_params=args.send_openai_sampling_params,
+    )
+    return LLMFullPromptProposer(
+        model=model,
         tokenizer=tokenizer,
-        chunker_names=chunker_names,
-        token_window_size=args.token_window_size,
+        params=GenerateParams(
+            max_tokens=args.proposer_max_output_tokens,
+            reasoning_effort=args.proposer_reasoning_effort,
+        ),
+        trace_path=Path(args.output_dir) / "proposer_traces.jsonl",
     )
-    (output_dir / "chunking_plan.json").write_text(
-        json.dumps(chunking_plan, ensure_ascii=False, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    generated_candidates = seed_population(
-        prompt.text,
-        tokenizer=tokenizer,
-        population_size=args.population_size,
-        proposer=rewrite_proposer,
-        chunker_names=chunker_names,
-        token_window_size=args.token_window_size,
-    )
-    candidates = _preview_candidate_subset(
-        prompt=prompt,
-        candidates=generated_candidates,
-        tokenizer=tokenizer,
-        min_token_reduction=args.preview_min_token_reduction,
-    )
-    rows = write_candidate_template_preview(
-        output_dir=output_dir,
-        original_prompt=prompt,
-        candidates=candidates,
-        tokenizer=tokenizer,
-    )
-    return {
-        "generated_candidate_count": len(generated_candidates),
-        "candidate_count": len(rows),
-        "preview_min_token_reduction": args.preview_min_token_reduction,
-        "chunkers": list(chunking_plan),
-        "token_window_size": args.token_window_size,
-        "original_prompt": str(output_dir / "original_prompt.txt"),
-        "candidate_templates_jsonl": str(output_dir / "candidate_templates.jsonl"),
-        "candidate_templates_markdown": str(output_dir / "candidate_templates.md"),
-        "chunking_plan": str(output_dir / "chunking_plan.json"),
-    }
-
-
-def _preview_candidate_subset(
-    *,
-    prompt: PromptTemplate,
-    candidates: list,
-    tokenizer,
-    min_token_reduction: float,
-) -> list:
-    original_instruction_tokens = tokenizer.count(prompt.instruction_text())
-    selected = []
-    for candidate in candidates:
-        candidate_prompt = PromptTemplate(candidate.prompt_template)
-        instruction_tokens = tokenizer.count(candidate_prompt.instruction_text())
-        token_reduction = 1.0 - (instruction_tokens / max(original_instruction_tokens, 1))
-        if token_reduction >= min_token_reduction:
-            selected.append(candidate)
-    return selected
 
 
 def _target_provider(args: argparse.Namespace) -> str:
     if args.provider == "auto":
         return "mock" if args.model == "mock" else "openai"
     return args.provider
+
+
+def _tokenizer_spec(args: argparse.Namespace) -> str:
+    if args.tokenizer != "auto":
+        return args.tokenizer
+    if _target_provider(args) == "openai":
+        return f"model:{args.model}"
+    return "approx"
+
+
+def _embedding_provider(provider: str, inputs: list[dict]) -> str:
+    if provider != "auto":
+        return provider
+    if inputs and all(isinstance(row.get("expected"), dict) for row in inputs):
+        return "lexical"
+    return "sentence-transformers"
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
-from prompt_compiler.optimize.optimizer import CompressionRunResult, optimize_prompt
+from prompt_compiler.optimize.optimizer import (
+    FeedbackOptimizationResult,
+    optimize_prompt,
+    optimize_prompt_legacy,
+)
 
-__all__ = ["CompressionRunResult", "optimize_prompt"]
-
+__all__ = ["FeedbackOptimizationResult", "optimize_prompt", "optimize_prompt_legacy"]

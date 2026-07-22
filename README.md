@@ -1,108 +1,101 @@
 # Lingua Symbolic Prompt Compiler
 
-Tokenizer-aware lingua-symbolic prompt compiler.
+This project learns shorter reusable instruction prompts from the behavior of a target model.
 
-The compiler takes a target model, an original prompt template, and input examples. It records behavioral reference outputs from the original prompt, then searches for shorter prompt templates whose target-model outputs stay close to those references.
-
-```text
-target model M
-original prompt template P
-input examples X
-
-reference: y_i = M(P, x_i)
-candidate: yhat_i = M(P_candidate, x_i)
-
-objective: reduce instruction tokens while preserving target-model behavior
-```
-
-## Current Pipeline
-
-1. Build behavioral references by running the frozen target model over the original prompt and input set.
-2. Split references into train, dev, and holdout sets.
-3. Extract bound prompt variables such as `{{input}}`, `{{query}}`, or `{{document}}` as protected slot chunks.
-4. Generate chunking variants around those bound slots with paragraph, sentence, markdown, schema-aware, instruction-role, and token-window chunkers.
-5. Use rewrite operators to produce candidate chunk variants.
-6. Assemble candidate prompt templates while preserving the original placeholder sequence.
-7. Run each candidate through the target model on the current evaluation subset.
-8. Score candidates with a normalized loss that combines semantic drift and token loss.
-9. Track validation checks separately from the loss, keep a Pareto frontier, generate the next population from frontier candidates, then evaluate finalists on dev and holdout sets.
-10. Write prompts, traces, reports, frontier files, candidate outputs, and run logs to disk.
-
-## Model Roles
-
-There are two model roles and three LLM call sites.
-
-The target behavior model is the user-selected `--model`. It is used for both behavior-bearing call sites:
-
-- reference generation: run the original prompt over each input
-- candidate completion: run each compressed candidate prompt over the same inputs
-
-The proposer model is the rewrite model. It rewrites individual non-bound chunks into shorter variants. It does not define the behavioral reference. For OpenAI-backed runs, the default proposer is:
+Given an original prompt `P`, target model `M`, and completion inputs `x_i`, it first records behavioral references:
 
 ```text
-gpt-5.4-mini-2026-03-17
+y_i = M(P, x_i)
 ```
 
-The target behavior model remains a CLI input. The proposer model is configurable with `--proposer-model`.
-
-## Bound Prompt Variables
-
-Prompt variables use double-curly template slots:
+It then searches for complete compressed prompts `P'` that save instruction tokens while keeping the resulting completions close to those references:
 
 ```text
-{{input}}
-{{query}}
-{{document}}
-{{tone}}
+maximize instruction-token savings
+minimize behavior loss between M(P', x_i) and y_i
 ```
 
-These slots form a bound variable layer. Chunkers split around them, mark them as protected input-slot chunks, and candidate assembly preserves their names and order. The proposer receives only rewriteable chunks; protected chunks pass through unchanged.
+The original prompt is reference data. It is never inserted into the candidate pool.
 
-The current assembly path checks the placeholder sequence before returning a candidate:
+## Optimization loop
+
+The active optimizer is a feedback-conditioned, full-prompt black-box search:
+
+1. Run the original prompt on every input to create the reference completions.
+2. Ask the proposer model for a diverse batch of complete, shorter prompt templates.
+3. Measure every proposal with the target tokenizer and run it on the same completion inputs.
+4. Compare candidate completions with the references using semantic distance and any configured output-contract checks.
+5. Maintain a cross-round Pareto archive over token savings and behavior loss.
+6. Feed frontier prompts, actual token counts, prompt diffs, poor trials, and worst completion residuals into the next proposer call.
+7. Repeat only candidates whose observed rewards are close or uncertain.
+8. Stop when the Pareto frontier no longer materially improves, or when the round budget is reached.
+9. Re-evaluate frontier candidates on dev and holdout examples.
+
+The proposer chooses the rewrite scope itself. A proposal can reorganize the whole prompt, merge distant redundancy, replace a section, or make a small repair. There is no active chunk/operator menu and no unchanged-prompt candidate.
+
+## Behavior reward
+
+Behavior preservation is learned from observed completions, not from a prose-only validation rule.
+
+When a dataset row contains a labeled JSON `expected` value, the optimizer measures field/value true positives, false positives, false negatives, precision, recall, F1, exact match, JSON validity, and schema validity. Candidate reward is based on regression from the original prompt's labeled task quality. This supports extraction tasks such as malicious-IP identification without hard-coding SOC-specific fields.
+
+When no task label is available, the soft behavior loss is:
 
 ```text
-original placeholders == assembled placeholders
+residual semantic distance
++ format failure rate
++ task-field failure rate
 ```
 
-## Rewrite Operators
+Natural target-model variation is estimated by repeating the original prompt. For labeled tasks this measures task-quality variation; otherwise it measures semantic-output variation. The observed variance is used to decide which close candidates need another rollout.
 
-The current exploration space includes:
+Format and task checks contribute to reward; they do not act as lexicographic hard gates. The only candidate eligibility constraints are structural necessities:
 
-- keep
-- short English
-- telegraph English
-- symbolic DSL
-- schema abbreviation
-- hybrid symbolic English
-- short Mandarin
-- formal Chinese
-- classical-Chinese-like
-- Mandarin-symbolic
-- bilingual DSL
-- mixed minimum-token form
+- it must use fewer instruction tokens than the original;
+- it must preserve the template placeholder sequence, such as `{{input}}`.
 
-The tokenizer decides whether Mandarin, symbolic, English, or mixed forms actually reduce cost for the configured model/tokenizer.
+## Model roles
+
+- The target model produces both the original reference completions and candidate completions.
+- The proposer model uses measured search history to propose the next full-prompt batch.
+- The configured tokenizer supplies actual instruction-token counts. Model-estimated counts are ignored.
 
 ## Setup
-
-Create the project Conda environment:
 
 ```bash
 conda env create -f environment.yml
 conda activate prompt-compression-layer
 ```
 
-Pip-only setup:
+or:
 
 ```bash
 python3 -m pip install -r requirements.txt
 ```
 
-`OPENAI_API_KEY` is loaded from the environment or `.env.local`.
+The CLI loads `OPENAI_API_KEY` from the environment or `.env.local`.
 
-## CLI
+## Run
 
-Mock local run:
+```bash
+python3 -m prompt_compiler.cli \
+  --provider openai \
+  --model gpt-5-nano \
+  --proposer-model gpt-5.4-mini \
+  --prompt examples/no_robots_rich_prompt.txt \
+  --inputs data/hf/no_robots_100.jsonl \
+  --output-dir runs/no_robots_feedback \
+  --rounds 8 \
+  --batch-size 8 \
+  --convergence-patience 3 \
+  --max-candidate-rollouts 2 \
+  --tokenizer model:gpt-5-nano \
+  --embedding-provider sentence-transformers \
+  --embedding-model mixedbread-ai/mxbai-embed-large-v1 \
+  --require-json
+```
+
+The target may also be the deterministic local mock while the proposal policy remains an LLM:
 
 ```bash
 python3 -m prompt_compiler.cli \
@@ -110,205 +103,61 @@ python3 -m prompt_compiler.cli \
   --model mock \
   --prompt examples/original_prompt.txt \
   --inputs examples/inputs.jsonl \
-  --output-dir runs/mock_run \
-  --epochs 3 \
-  --population-size 32 \
-  --tokenizer approx \
-  --embedding-provider lexical \
-  --require-json
+  --output-dir runs/mock_feedback \
+  --rounds 3 \
+  --batch-size 4
 ```
 
-OpenAI target model with OpenAI proposer and Mixedbread embeddings:
+Useful controls:
+
+- `--frontier-parent-limit`: number of diverse Pareto parents shown to the proposer.
+- `--recent-contrast-limit`: number of poor recent trials shown as counterexamples.
+- `--worst-example-limit`: worst completion residuals included per feedback candidate.
+- `--baseline-repeats`: original-prompt repeats used to estimate output noise.
+- `--repeat-top-k`: maximum close or uncertain candidates selected for extra rollouts.
+- `--max-candidate-rollouts`: total rollout cap for those selected candidates.
+- `--min-frontier-improvement` and `--convergence-patience`: convergence controls.
+- `--preview-proposals`: generate the first full-prompt proposal batch without target evaluation.
+- `--no-feedback`: withhold candidate outcomes from later rounds for an ablation.
+- `--selection-behavior-penalty`: explicit behavior-loss penalty used only to recommend one point from the final Pareto frontier.
+
+OpenAI calls have no client request timeout and no output-token ceiling by default. `--max-output-tokens` and `--proposer-max-output-tokens` are opt-in experiment controls.
+
+The default `auto` evaluation profile uses labeled precision/recall/F1 when `expected` JSON is present. For unlabeled tasks it uses normalized sentence-transformer embeddings; lexical distance is only an explicit offline fallback.
+
+The default `auto` tokenizer uses the target model's tokenizer for OpenAI runs and the approximate tokenizer only for local mock runs.
+
+## Budget-matched feedback ablation
+
+Run the same round, batch, rollout, model, and dataset settings twice, changing only `--no-feedback`:
 
 ```bash
-python3 -m prompt_compiler.cli \
-  --provider openai \
-  --model gpt-5-nano-2025-08-07 \
-  --proposer openai \
-  --proposer-model gpt-5.4-mini-2026-03-17 \
-  --proposer-reasoning-effort medium \
-  --proposer-max-output-tokens 16384 \
-  --prompt examples/no_robots_rich_prompt.txt \
-  --inputs data/hf/no_robots_100.jsonl \
-  --output-dir runs/no_robots_rich_gpt5nano_llm \
-  --epochs 4 \
-  --population-size 16 \
-  --max-output-tokens 256 \
-  --max-concurrency 1 \
-  --tokenizer tiktoken:cl100k_base \
-  --embedding-provider sentence-transformers \
-  --embedding-model mixedbread-ai/mxbai-embed-large-v1 \
-  --require-json
+# learned feedback loop
+python3 -m prompt_compiler.cli ... --output-dir runs/feedback
+
+# same proposal/evaluation budget, but no measured search feedback
+python3 -m prompt_compiler.cli ... --output-dir runs/no_feedback --no-feedback
 ```
 
-Useful CLI controls:
+Use a convergence patience greater than the round count when the experiment must consume exactly the same round budget. Compare `search_archive.json`, `compression_report.json`, and `pareto_frontier.csv`.
 
-- `--preview-candidates`: write reassembled candidate prompt templates and exit before target-model evaluation
-- `--preview-min-token-reduction`: minimum estimated instruction-token reduction for previewed candidates, default `0.15`
-- `--chunkers`: comma-separated chunkers, default `paragraph,sentence,markdown,schema_aware`
-- `--live-log-file`: stable JSONL mirror for `tail -f`, default `runs/live_run_events.jsonl`
-- `--max-concurrency`: maximum concurrent candidate evaluations
-- `--input-limit`: use the first N rows from the input JSONL
-- `--semantic-drift-normalization`: positive scalar used to normalize raw semantic drift before combining it into loss
-- `--send-openai-sampling-params`: sends `temperature` and `top_p` to OpenAI Responses for endpoints that support them
+The former chunk/operator optimizer remains exposed as `optimize_prompt_legacy` only for historical budget-matched comparisons; it is not used by the CLI or the default package API.
 
-## Tokenizers
+## Artifacts
 
-- `approx`: dependency-free tokenizer for local development
-- `tiktoken:<encoding>`: explicit tiktoken encoding, for example `tiktoken:cl100k_base`
-- `model:<model-name>`: `tiktoken.encoding_for_model(...)`
-
-The primary compression metric is instruction-token reduction:
-
-```text
-1 - candidate_instruction_tokens / original_instruction_tokens
-```
-
-Rendered prompt token counts are also tracked because long inputs can dominate total tokens.
-
-## Embedding Drift
-
-Embedding drift is raw Euclidean distance over completion embeddings in the configured embedding model's vector space:
-
-```text
-semantic_drift = || embed(candidate_output) - embed(reference_output) ||_2
-```
-
-The semantic-drift score is normalized after distance is computed:
-
-```text
-semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
-```
-
-`semantic_drift_normalization` is an explicit scalar for the embedding model and evaluation context, such as the maximum observed raw drift in a candidate-comparison run.
-
-Supported providers:
-
-- `lexical`: dependency-free local fallback
-- `sentence-transformers`: local sentence-transformers embeddings
-- `hf-inference`: Hugging Face Inference feature extraction
-
-The default embedding model for non-lexical providers is:
-
-```text
-mixedbread-ai/mxbai-embed-large-v1
-```
-
-## Evaluation Objective
-
-The core evaluation objective is the tradeoff between compression and generated-output equivalence:
-
-```text
-maximize token_reduction
-minimize embedding_drift
-```
-
-The scalar loss is a normalized minimize objective:
-
-```text
-token_reduction = 1 - candidate_instruction_tokens / original_instruction_tokens
-token_reduction_norm = clamp(token_reduction, 0, 1)
-token_loss_norm = 1 - token_reduction_norm
-semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
-
-loss = weighted_average(token_loss_norm, semantic_drift_norm)
-```
-
-With the default equal weights:
-
-```text
-loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
-```
-
-The loss is in `[0, 1]`; lower is better. `objective_score` in candidate reports is this normalized loss.
-
-Structured output validity is tracked separately from the scalar objective:
-
-- format failure rate
-- task-field failure rate
-- failure cases
-
-Those validity signals describe whether a candidate output remains usable by the downstream contract. They are not output-equivalence distance terms.
-
-## Current Checkpoint
-
-The current verified checkpoint is the no-robots rich-prompt candidate run:
-
-```text
-candidate run: runs/no_robots_llm_prompt_v3
-side-by-side run: runs/no_robots_llm_prompt_v3_side_by_side_v3
-proposer model: gpt-5.4-mini-2026-03-17
-target model: gpt-5-nano-2025-08-07
-embedding model: mixedbread-ai/mxbai-embed-large-v1
-```
-
-Run shape:
-
-- 24 proposer chunk rewrites saved in `proposer_traces.jsonl`
-- 6 candidate prompt templates saved in `candidate_templates.jsonl`
-- 3 inputs evaluated
-- 3 original-prompt reference completions
-- 18 candidate-prompt completions
-
-Verification artifacts:
-
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/provenance_audit.md`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_proposer_retrieval_audit.json`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/openai_response_retrieval_audit.json`
-- `runs/no_robots_llm_prompt_v3_side_by_side_v3/loss_metrics.md`
-
-Candidate ranking from the checkpoint:
-
-| rank | candidate | token reduction | normalized drift | loss | validation note |
-|---:|---:|---:|---:|---:|---|
-| 1 | 4 | 0.399 | 0.598 | 0.599 | clear |
-| 2 | 3 | 0.416 | 0.616 | 0.600 | clear |
-| 3 | 1 | 0.347 | 0.577 | 0.615 | clear |
-| 4 | 5 | 0.387 | 0.669 | 0.641 | clear |
-| 5 | 2 | 0.382 | 0.686 | 0.652 | clear |
-| 6 | 6 | 0.295 | 0.728 | 0.717 | leaked meta structure |
-
-## Hugging Face Data
-
-The repo includes a normalized sample from `HuggingFaceH4/no_robots`:
-
-```text
-data/hf/no_robots_100.jsonl
-```
-
-Refresh it with:
-
-```bash
-python3 scripts/download_instruction_dataset.py \
-  --dataset HuggingFaceH4/no_robots \
-  --config default \
-  --split train \
-  --limit 100 \
-  --output data/hf/no_robots_100.jsonl
-```
-
-Each row contains `id`, `input`, `reference_output`, `dataset`, `category`, and source metadata.
-
-## Output Artifacts
-
-Each run writes artifacts under `--output-dir`:
+Each run writes:
 
 - `best_prompt.txt`
-- `best_prompt_template.json`
 - `compression_report.json`
+- `search_archive.json`
 - `pareto_frontier.csv`
 - `dev_frontier.csv`
-- `failures.json`
-- `reference_dataset.jsonl`
 - `candidate_prompts.jsonl`
 - `candidate_reports.jsonl`
 - `candidate_outputs.jsonl`
-- `holdout_reports.jsonl`
+- `reference_dataset.jsonl`
+- `failures.json`
+- `proposer_traces.jsonl`
 - `run_events.jsonl`
-- `proposer_traces.jsonl` when using the LLM proposer
 
-The stable live log mirror defaults to:
-
-```text
-runs/live_run_events.jsonl
-```
+`search_archive.json` is the compact learning record: complete prompts, parent relationships, actual instruction-token savings, behavior loss, and per-example residuals across rounds.

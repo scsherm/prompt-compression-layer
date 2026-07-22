@@ -64,7 +64,7 @@ class SentenceTransformersEmbeddingClient:
         self._model = sentence_transformers.SentenceTransformer(model_name)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        encoded = self._model.encode(texts)
+        encoded = self._model.encode(texts, normalize_embeddings=True)
         return _to_vector_list(encoded)
 
 
@@ -75,7 +75,7 @@ class HuggingFaceInferenceEmbeddingClient:
         *,
         api_key: str | None = None,
         provider: str | None = None,
-        normalize: bool = False,
+        normalize: bool = True,
     ):
         try:
             huggingface_hub = import_module("huggingface_hub")
