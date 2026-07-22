@@ -23,209 +23,79 @@ y_i = M(P, x_i)
 Candidate outputs are evaluated against those references:
 
 ```text
-yhat_i = M(P_candidate, x_i)
+yhat_i = M(P', x_i)
 ```
 
-## System Diagram
+The active optimizer uses feedback-conditioned search over complete prompt templates.
 
 ```mermaid
-flowchart TD
-    P["Original prompt template P"] --> S["Bound variable layer"]
-    S --> B["Protected slot chunks"]
-    S --> C["Chunking variants"]
-    C --> D["Rewriteable chunks"]
-    D --> E["Rewrite operators"]
-    E --> F["LLM proposer"]
-    F --> G["Compressed chunk variants"]
-    B --> H["Candidate assembly"]
-    G --> H
-    H --> I["Candidate prompt templates"]
+flowchart LR
+    P["Original prompt"] --> R["Reference completions"]
+    X["Completion inputs"] --> R
+    M["Target model"] --> R
 
-    X["Input examples X"] --> R["Reference builder"]
-    P --> R
-    TM1["Target model M"] --> R
-    R --> Y["Behavioral reference dataset"]
-    Y --> SPLIT["Train, dev, holdout split"]
-
-    I --> EV["Candidate evaluation"]
-    SPLIT --> EV
-    TM2["Target model M"] --> EV
-    EV --> REP["Candidate reports with normalized loss"]
-    REP --> PF["Pareto frontier"]
-    PF --> OPT["Epoch optimizer"]
-    OPT --> E
-    PF --> ART["Run artifacts"]
+    P --> Q["LLM proposal policy"]
+    F["Measured frontier and residuals"] --> Q
+    Q --> C["Complete compressed prompts"]
+    C --> E["Target-model evaluation"]
+    X --> E
+    M --> E
+    R --> E
+    E --> A["Cross-round Pareto archive"]
+    A --> F
+    A --> D["Dev and holdout selection"]
 ```
 
-## Layers
+## Search state
 
-### Bound Variable Layer
+The original prompt produces the behavioral reference completions used throughout the search.
 
-Prompt variables are template slots such as `{{input}}`, `{{query}}`, `{{document}}`, and `{{tone}}`.
+Every trial stores:
 
-The bound variable layer extracts those slots as protected input-slot chunks before rewrite exploration. Candidate assembly preserves the original placeholder sequence, so the compressed template remains renderable by the same input contract as the original prompt.
+- the complete deployable prompt;
+- its actual instruction-token count and savings;
+- its parent proposal ids;
+- aggregate behavior loss;
+- per-example reference and candidate completions.
 
-### Chunking Layer
+The archive retains nondominated trials across every round. A trial dominates another when it saves at least as many tokens with no more behavior loss, and is strictly better on one of those objectives.
 
-Chunkers produce alternative views of the invariant instruction layer around the bound slots.
+## Proposal policy
 
-Current chunkers:
+The proposer receives the original prompt plus empirical search feedback:
 
-- paragraph
-- sentence
-- markdown
-- schema-aware
-- instruction-role
-- token-window
+- diverse frontier parents;
+- actual target-tokenizer counts;
+- diffs from the original prompt;
+- semantic, format, and task metrics;
+- poor recent trials;
+- worst completion residuals;
+- round-by-round frontier improvement.
 
-Each chunk carries an id, text, type, character span, token count, and protected flag.
+The proposer returns complete prompts. Candidate eligibility requires a shorter instruction-token count and preservation of the template placeholder sequence.
 
-Chunk types:
+## Reward and uncertainty
 
-- role
-- task
-- constraint
-- negative constraint
-- output schema
-- example
-- style
-- input slot
-- safety
-- tool instruction
-- unknown
+Candidate completions are compared with the original-prompt completions on the same inputs. When labeled expected JSON is present, the primary signal is the change in ground-truth precision, recall, and F1. For unlabeled examples, semantic distance is the primary behavior signal. Format and task-field failures contribute to behavior loss.
 
-### Exploration Layer
+Repeated original-prompt completions estimate the target model's natural task or output variation. The estimate supports:
 
-The exploration layer applies rewrite operators to non-bound chunks and assembles candidate prompt templates.
+1. natural-distance correction in candidate semantic loss;
+2. additional rollouts for close or uncertain frontier candidates.
 
-Current operator families:
+Additional sampling is concentrated on candidates near the estimated frontier.
 
-- keep
-- short English
-- telegraph English
-- symbolic DSL
-- schema abbreviation
-- hybrid symbolic English
-- short Mandarin
-- formal Chinese
-- classical-Chinese-like
-- Mandarin-symbolic
-- bilingual DSL
-- mixed minimum-token form
+## Convergence and selection
 
-For OpenAI-backed exploration, the LLM proposer rewrites one source chunk at a time and returns structured JSON with `rewritten_chunk`, `rationale`, and `risk_notes`.
+Search progress is the normalized hypervolume dominated by the token-savings/behavior-quality frontier. The loop stops after a configured number of rounds without material hypervolume improvement.
 
-### Evaluation Layer
+Search-frontier prompts are evaluated on dev examples. The dev Pareto frontier is then evaluated on holdout examples. The complete frontier is the primary result, with one prompt recommended using a configurable behavior-loss penalty.
 
-Evaluation runs candidate templates through the target model on the current reference subset. The target model is also the model used to build behavioral references, so comparisons measure behavior under the same model role.
+## Components
 
-The optimization objective is the tradeoff between prompt compression and generated-output equivalence:
-
-- instruction tokens
-- token reduction
-- Euclidean embedding drift
-
-Embedding drift is computed as raw Euclidean distance over completion embeddings. The scalar loss normalizes the resulting metric values before combining them:
-
-```text
-token_reduction_norm = clamp(token_reduction, 0, 1)
-token_loss_norm = 1 - token_reduction_norm
-semantic_drift_norm = clamp(semantic_drift / semantic_drift_normalization, 0, 1)
-loss = weighted_average(token_loss_norm, semantic_drift_norm)
-```
-
-With the default equal weights:
-
-```text
-loss = 0.5 * token_loss_norm + 0.5 * semantic_drift_norm
-```
-
-The scalar loss is bounded to `[0, 1]`, and lower is better.
-
-Validity and audit signals are tracked separately:
-
-- format failure rate
-- task-field failure rate
-- failure cases
-- candidate output records
-- model usage
-- meta-structure leakage flags in experiment reports
-
-These validation signals do not contribute to the scalar loss; they identify candidates that may need filtering or manual inspection. Mixedbread embeddings are supported through `sentence-transformers` or Hugging Face Inference.
-
-### Optimizer Layer
-
-Each epoch evaluates the current population, computes a Pareto frontier, then generates the next population from frontier candidates.
-
-The current optimizer flow:
-
-```text
-seed population
-for each epoch:
-  evaluate candidates on train subset
-  compute Pareto frontier
-  mutate frontier candidates into next population
-evaluate finalists on dev set
-evaluate dev frontier on holdout set
-write artifacts
-```
-
-The split strategy is deterministic:
-
-```text
-train:   first 60 percent
-dev:     next 20 percent
-holdout: final 20 percent
-```
-
-Small datasets reuse available examples for train/dev and leave holdout empty.
-
-## Model Configuration
-
-The target model configuration is part of the behavioral reference definition:
-
-- provider
-- model name
-- endpoint
-- system prompt
-- generation parameters
-- max output tokens
-- tool configuration
-- tokenizer specification
-
-The proposer model is a separate configurable role. Its output affects candidate prompt construction, while the target model remains the behavior model used for reference and candidate completions.
-
-## Observability
-
-Each run writes structured JSONL events to:
-
-```text
-<output-dir>/run_events.jsonl
-```
-
-The CLI also mirrors run events to a stable live log path by default:
-
-```text
-runs/live_run_events.jsonl
-```
-
-Human-readable progress lines include the phase, candidate id, drift, token reduction, cost estimate when available, and elapsed time.
-
-LLM proposer traces are written to:
-
-```text
-<output-dir>/proposer_traces.jsonl
-```
-
-These traces include the rendered proposer prompt, proposer response, parsed JSON, rewritten chunk, usage, metadata, and validation status.
-
-Candidate preview runs can stop after assembly and write:
-
-```text
-<output-dir>/original_prompt.txt
-<output-dir>/chunking_plan.json
-<output-dir>/candidate_templates.jsonl
-<output-dir>/candidate_templates.md
-```
-
-These files are useful for inspecting reassembled templates and placeholder preservation before running target-model candidate completions.
+- `operators/full_prompt_proposer.py`: feedback schema and LLM proposal policy.
+- `optimize/search_state.py`: trials, Pareto archive, parent selection, and convergence.
+- `optimize/reward.py`: rollout aggregation and uncertainty-based resampling.
+- `optimize/feedback_optimizer.py`: end-to-end learning loop.
+- `eval/evaluator.py`: target completions and behavior comparisons.
+- `reports/writer.py`: reproducible run artifacts.
